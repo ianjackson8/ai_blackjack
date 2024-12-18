@@ -19,11 +19,11 @@ python3 play_blackjack.py
     - "by the books" plays based on best odds table
 
 # Changelog
-- v1.0
-  - implement core blackjack game
-  - add ending graph
-- v1.1
-  - implement bots into the game, one strategy
 - v1.2
   - add the by the books strategy
   - fix the double feature
+- v1.1
+  - implement bots into the game, one strategy
+- v1.0
+  - implement core blackjack game
+  - add ending graph
