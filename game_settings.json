@@ -4,5 +4,11 @@
     "default_bet": 10,
     "show_output": "True",
     "log_game": "True",
-    "show_graph": "True"
+    "show_graph": "True",
+    "bots" : [
+        {
+            "name": "bot1",
+            "strategy": "by the books"
+        }
+    ]
 }

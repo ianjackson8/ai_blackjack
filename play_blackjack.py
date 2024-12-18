@@ -2,11 +2,10 @@
 Play blackjack in terminal
 
 Author: Ian Jackson
-Version v0.2
+Version v1.2
 
 '''
 #== todo list ==#
-# [ ] test funtionality
 
 #== Imports ==#
 import random
@@ -193,6 +192,15 @@ class Hand():
         '''
         return self.calculate_value() > 21 
 
+    def num_cards(self) -> int:
+        '''
+        returns number of cards in hand
+
+        Returns:
+            int: num of cards in hand
+        '''
+        return len(self.cards)
+
     def __repr__(self) -> str:
         '''
         string representation of hand
@@ -298,10 +306,9 @@ class Player:
             ValueError: if the player has insufficient funds
             ValueError: if the player cannot double down after hit
         '''
-        # BUG: doesnt allow hit when it should
         if self.current_bet > self.balance:
             raise ValueError(f"{bcolors.FAIL}[ERR] Insufficient balance to double down.{bcolors.ENDC}")
-        if len(self.hands) != 2:
+        if self.hands[0].num_cards() != 2: # FIX: split case
             raise ValueError(f"{bcolors.FAIL}[ERR] Cannot double down after a hit.{bcolors.ENDC}")
 
         self.balance -= self.current_bet
@@ -329,7 +336,7 @@ class Player:
         return f""
 
 class Bot(Player):
-    def __init__(self, name: str, balance: int):
+    def __init__(self, name: str, balance: int, strategy: str):
         '''
         initialize a bot with name, balance, and empty hand
 
@@ -338,6 +345,7 @@ class Bot(Player):
             balance (int): initial balance of bot
         '''
         super().__init__(name, balance)
+        self.strategy = strategy
 
     def play_turn(self, shoe: Shoe, dealer_visible_card: str):
         '''
@@ -359,16 +367,107 @@ class Bot(Player):
                 else:
                     print(f"{bcolors.FAIL} Invalid action: {action} {bcolors.ENDC}")
 
-    def make_decision(self, dealer_visible_card: str):
-        hand_value = self.hands[0].calculate_value()
+    def make_decision(self, dealer_visible_card: str) -> str:
+        '''
+        make a decision on the hand, based on strategy
 
-        if hand_value <= 16:
-            return "hit"
+        Args:
+            dealer_visible_card (str): dealer's visible card
+
+        Returns:
+            str: decision on hand
+        '''
+        # decision table for by the books
+        # TODO: add soft table 
+        # TODO: add split table 
+        # dealer card: player hand
+        DECISION_TABLE_BTB = {
+            # player hard
+            2: {
+                4: "hit", 5: "hit", 6: "hit", 7: "hit", 8: "hit", 9: "hit",
+                10: "double", 11: "double", 12: "hit", 13: "stand", 14: "stand",
+                15: "stand", 16: "stand", 17: "stand", 18: "stand", 19: "stand",
+                20: "stand", 21: "stand"
+            },
+            3: {
+                4: "hit", 5: "hit", 6: "hit", 7: "hit", 8: "hit", 9: "double",
+                10: "double", 11: "double", 12: "hit", 13: "stand", 14: "stand",
+                15: "stand", 16: "stand", 17: "stand", 18: "stand", 19: "stand",
+                20: "stand", 21: "stand"
+            },
+            4: {
+                4: "hit", 5: "hit", 6: "hit", 7: "hit", 8: "hit", 9: "double",
+                10: "double", 11: "double", 12: "stand", 13: "stand", 14: "stand",
+                15: "stand", 16: "stand", 17: "stand", 18: "stand", 19: "stand",
+                20: "stand", 21: "stand"
+            },
+            5: {
+                4: "hit", 5: "hit", 6: "hit", 7: "hit", 8: "hit", 9: "double",
+                10: "double", 11: "double", 12: "stand", 13: "stand", 14: "stand",
+                15: "stand", 16: "stand", 17: "stand", 18: "stand", 19: "stand",
+                20: "stand", 21: "stand"
+            },
+            6: {
+                4: "hit", 5: "hit", 6: "hit", 7: "hit", 8: "hit", 9: "double",
+                10: "double", 11: "double", 12: "stand", 13: "stand", 14: "stand",
+                15: "stand", 16: "stand", 17: "stand", 18: "stand", 19: "stand",
+                20: "stand", 21: "stand"
+            },
+            7: {
+                4: "hit", 5: "hit", 6: "hit", 7: "hit", 8: "hit", 9: "hit",
+                10: "double", 11: "double", 12: "hit", 13: "hit", 14: "hit",
+                15: "hit", 16: "hit", 17: "stand", 18: "stand", 19: "stand",
+                20: "stand", 21: "stand"
+            },
+            8: {
+                4: "hit", 5: "hit", 6: "hit", 7: "hit", 8: "hit", 9: "hit",
+                10: "double", 11: "double", 12: "hit", 13: "hit", 14: "hit",
+                15: "hit", 16: "hit", 17: "stand", 18: "stand", 19: "stand",
+                20: "stand", 21: "stand"
+            },
+            9: {
+                4: "hit", 5: "hit", 6: "hit", 7: "hit", 8: "hit", 9: "hit",
+                10: "double", 11: "double", 12: "hit", 13: "hit", 14: "hit",
+                15: "hit", 16: "hit", 17: "stand", 18: "stand", 19: "stand",
+                20: "stand", 21: "stand"
+            },
+            10: {
+                4: "hit", 5: "hit", 6: "hit", 7: "hit", 8: "hit", 9: "hit",
+                10: "hit", 11: "double", 12: "hit", 13: "hit", 14: "hit",
+                15: "hit", 16: "hit", 17: "stand", 18: "stand", 19: "stand",
+                20: "stand", 21: "stand"
+            },
+            11: {
+                4: "hit", 5: "hit", 6: "hit", 7: "hit", 8: "hit", 9: "hit",
+                10: "hit", 11: "hit", 12: "hit", 13: "hit", 14: "hit",
+                15: "hit", 16: "hit", 17: "stand", 18: "stand", 19: "stand",
+                20: "stand", 21: "stand"
+            },
+        }
+
+        #= default =#
+        if self.strategy == "default":
+            hand_value = self.hands[0].calculate_value()
+
+            if hand_value <= 16:
+                return "hit"
+            else:
+                return "stand"
+            
+        #= by the book =#
+        elif self.strategy == "by the books":
+            dealer_value = get_card_value(dealer_visible_card)
+            hand_value = self.hands[0].calculate_value()
+
+            if dealer_value not in DECISION_TABLE_BTB or hand_value not in DECISION_TABLE_BTB[dealer_value]:
+                return "stand"  # Default action if no rule exists
+            return DECISION_TABLE_BTB[dealer_value][hand_value]
+
         else:
-            return "stand"
+            raise ValueError(f"{bcolors.FAIL}[ERR] Invalid bot strategy {self.strategy}.{bcolors.ENDC}")
 
 class BlackjackGame:
-    def __init__(self, num_decks: int, player_names: List[str], bot_names: List[str], starting_balance: int, log_file: str):
+    def __init__(self, num_decks: int, player_names: List[str], bot_info: List[dict], starting_balance: int, log_file: str):
         '''
         init the game with a shoe, dealer, and players
         shuffles deck
@@ -376,7 +475,7 @@ class BlackjackGame:
         Args:
             num_decks (int): number of decks to use
             player_names (List[str]): list of players
-            bot_names: (List[str]): list of bot names
+            bot_info: (List[dict]): bot name and play strategy
             starting_balance (int): initial balance for each player
             log_file (str): path of the logfile
         '''
@@ -385,7 +484,7 @@ class BlackjackGame:
         self.shoe.shuffle()
         self.dealer = Player("Dealer", balance=0)
         self.players = [Player(name, starting_balance) for name in player_names]
-        self.bots = [Bot(name, starting_balance) for name in bot_names]
+        self.bots = [Bot(bot['name'], starting_balance, bot['strategy']) for bot in bot_info]
         self.log_file = log_file
         self.round_data = {}
         self.game_num = 0
@@ -655,7 +754,26 @@ class BlackjackGame:
             self.shoe.shuffle()
 
 #== Methods =#
+def get_card_value(card_str: str) -> int:
+    """
+    Extract the numeric value of a card from its string representation.
 
+    Args:
+        card_str (str): The string representation of the card (e.g., "2 of Clubs").
+
+    Returns:
+        int: The numeric value of the card.
+    """
+    # Extract the rank (e.g., "2", "Ace", "King") from "2 of Clubs"
+    rank = card_str.split(" ")[0]
+    
+    # Convert the rank to its numeric value
+    if rank in ["Jack", "Queen", "King"]:
+        return 10  # Face cards are worth 10
+    elif rank == "Ace": # FIX: return ace as soft
+        return 11  # Default Ace to 11
+    else:
+        return int(rank)  # Numeric cards retain their values
 
 #== Main execution ==#
 def main():
@@ -685,17 +803,6 @@ def main():
             
             print(f"{bcolors.FAIL}[ERR] Must be at least one player{bcolors.ENDC}")
 
-    # get bots
-    bots = []
-    while True:
-        is_bots = input(f"Include bots in the game? (y/n): ")
-        if is_bots == "n":
-            break
-        else:
-            num_bots = int(input("Enter number of bots: "))
-            bots = [f"Bot{i}" for i in range(num_bots)]
-            break
-
     # set up log file -- make folder if it doesnt exist
     if LOG_GAME:
         if not os.path.exists("logs"):
@@ -709,7 +816,7 @@ def main():
     bj_game = BlackjackGame(
         num_decks = settings['num_decks'], 
         player_names = players,
-        bot_names = bots,
+        bot_info = settings['bots'],
         starting_balance = settings['init_balance'],
         log_file = log_file
     )
