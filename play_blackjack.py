@@ -13,9 +13,10 @@ import os
 import json
 import argparse
 
+import matplotlib.pyplot as plt #type: ignore
+
 from typing import List, Union
 from datetime import datetime
-from calc_stats import parse_log_and_plot
 
 #== Global Variables ==#
 SHOW_OUTPUT = True
@@ -364,6 +365,16 @@ class Bot(Player):
                     hand.add_card(card)
                 elif action == "stand":
                     break
+                elif action == "double":
+                    if self.balance >= self.current_bet:  # Ensure enough balance to double
+                        self.balance -= self.current_bet
+                        self.current_bet *= 2
+                        card = shoe.draw_card()
+                        hand.add_card(card)
+                        break  # Doubling ends the turn
+                    else:
+                        print(f"\t{bcolors.OKBLUE}[i] cannot double due to insufficient balance.{bcolors.ENDC}")
+                        action = "hit"  # Fall back to hitting if double is not possible
                 else:
                     print(f"{bcolors.FAIL} Invalid action: {action} {bcolors.ENDC}")
 
@@ -774,6 +785,60 @@ def get_card_value(card_str: str) -> int:
         return 11  # Default Ace to 11
     else:
         return int(rank)  # Numeric cards retain their values
+
+def parse_log_and_plot(log_file):
+    try:
+        with open(log_file, 'r') as file:
+            logs = json.load(file)
+    except FileNotFoundError:
+        print(f"Error: The file {log_file} does not exist.")
+        return
+    except json.JSONDecodeError:
+        print(f"Error: Failed to parse the JSON file {log_file}.")
+        return
+    
+    # Extract balance and round number
+    with open('game_settings.json', 'r') as file:
+            settings = json.load(file)
+
+    init_bal = settings["init_balance"]
+
+    # Extract balance and round number for all players
+    player_balances = {}
+
+    players = logs[0].get("players", [])
+    for player in players:
+        name = player.get("name")
+        player_balances[name] = []
+        player_balances[name].append((0, init_bal))
+
+    for round_number, entry in enumerate(logs, start=1):
+        players = entry.get("players", [])
+        for player in players:
+            name = player.get("name")
+            balance = player.get("balance")
+            if name and balance is not None:
+                if name not in player_balances:
+                    player_balances[name] = []
+
+                if round_number == 0:
+                    player_balances[name].append((0, init_bal))
+                else:
+                    player_balances[name].append((round_number, balance))
+
+    # Plotting
+    plt.figure(figsize=(10, 6))
+
+    for player, rounds_and_balances in player_balances.items():
+        rounds, balances = zip(*rounds_and_balances)
+        plt.plot(rounds, balances, marker='o', linestyle='-', label=player)
+
+    plt.title("Player Balances Over Rounds")
+    plt.xlabel("Round Number")
+    plt.ylabel("Balance")
+    plt.grid(True)
+    plt.legend()
+    plt.show()
 
 #== Main execution ==#
 def main():
