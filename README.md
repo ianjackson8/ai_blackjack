@@ -19,6 +19,11 @@ python3 play_blackjack.py
     - "by the books" plays based on best odds table
 
 # Changelog
+- v1.3
+  - fix graph not starting at initial balance on graph
+  - fix bug where when bot doubles it crashes
+  - remove the old blackjack bot file
+  - integrate parse and graph logfile into main file, delete other file
 - v1.2
   - add the by the books strategy
   - fix the double feature
