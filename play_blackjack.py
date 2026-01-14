@@ -1,3 +1,4 @@
+#!myenv/bin/python3.12
 '''
 Play blackjack in terminal
 
@@ -12,8 +13,12 @@ import random
 import os
 import json
 import argparse
+import torch 
 
-import matplotlib.pyplot as plt #type: ignore
+import numpy as np
+import torch.nn as nn 
+import torch.optim as optim 
+import matplotlib.pyplot as plt 
 
 from typing import List, Union
 from datetime import datetime
@@ -23,6 +28,7 @@ SHOW_OUTPUT = True
 LOG_GAME = True
 SHOW_GRAPH = True
 DEFAULT_BET = 10
+TRAIN_MODE = False
 
 #== Classes ==#
 class bcolors:
@@ -357,12 +363,15 @@ class Bot(Player):
             dealer_visible_card (str): dealer's visible card
         '''
         for hand in self.hands:
+            print(f"\n{self.name}'s turn:\n\tCurrent Hand: {hand}")
             while not hand.is_blackjack() and not hand.is_busted():
                 action = self.make_decision(dealer_visible_card)
+                print(f"\t{self.name} chooses to {action}")
 
                 if action == "hit":
                     card = shoe.draw_card()
                     hand.add_card(card)
+                    print(f"\t{self.name} hits: {hand}")
                 elif action == "stand":
                     break
                 elif action == "double":
@@ -371,6 +380,7 @@ class Bot(Player):
                         self.current_bet *= 2
                         card = shoe.draw_card()
                         hand.add_card(card)
+                        print(f"\t{self.name} doubles: {hand}")
                         break  # Doubling ends the turn
                     else:
                         print(f"\t{bcolors.OKBLUE}[i] cannot double due to insufficient balance.{bcolors.ENDC}")
@@ -495,10 +505,27 @@ class BlackjackGame:
         self.shoe.shuffle()
         self.dealer = Player("Dealer", balance=0)
         self.players = [Player(name, starting_balance) for name in player_names]
-        self.bots = [Bot(bot['name'], starting_balance, bot['strategy']) for bot in bot_info]
+        
+        # Initialize bots from settings
+        self.bots = []
+        for bot in bot_info:
+            if bot.get('strategy') == 'ai':
+                self.bots.append(TrainableBot(bot['name'], starting_balance, 2, 3))
+            else:
+                self.bots.append(Bot(bot['name'], starting_balance, bot['strategy']))
+        
         self.log_file = log_file
         self.round_data = {}
         self.game_num = 0
+
+        # Load AI bot models if they exist
+        for bot in self.bots:
+            if isinstance(bot, TrainableBot):
+                try:
+                    additional_data = load_model(bot.q_network, bot.optimizer, "bot_model.pth")
+                    bot.epsilon = additional_data.get("epsilon", 1.0)  # Default to 1.0 if not found
+                except FileNotFoundError as e:
+                    print(f"{bcolors.OKBLUE}[i] AI Save not found, creating new AI. {bcolors.ENDC}")
 
     def setup_round(self) -> None:
         '''
@@ -662,9 +689,10 @@ class BlackjackGame:
             while True:
                 try:
                     # bots
-                    if isinstance(player, Bot):
+                    if isinstance(player, Bot) or isinstance(player, TrainableBot):
                         global DEFAULT_BET
                         bet = min(DEFAULT_BET, player.balance)
+
                         player.place_bet(bet)
                         break
                     else: # player
@@ -681,7 +709,7 @@ class BlackjackGame:
         # Players take turns
         for player in self.players + self.bots:
             if player.current_bet > 0:  # Only allow turns for players who bet
-                if isinstance(player, Bot):
+                if isinstance(player, Bot) or isinstance(player, TrainableBot):
                     player.play_turn(self.shoe, str(self.dealer.hands[0].cards[1]))
                 else:
                     self.player_turn(player)
@@ -696,6 +724,9 @@ class BlackjackGame:
         for player in self.players + self.bots:
             if player.current_bet > 0:
                 self.determine_winner(player)
+                # Update AI bot with final reward
+                if isinstance(player, TrainableBot):
+                    player.update_final_reward(player.result)
 
         global LOG_GAME
         if LOG_GAME: self.log_game()
@@ -704,16 +735,32 @@ class BlackjackGame:
         '''
         start and play a game of blackjack
         '''
+        ai_done = False
+
         while True:
             os.system('cls' if os.name == 'nt' else 'clear')  # Clear the terminal
             print("Welcome to Blackjack!")
             self.display_players()
             print()
-            self.play_round()
-            if input("Play another round? (yes/no): ").lower() != "yes":
+
+            if self.bots[0].balance <= 10:
+                ai_done = True
+            else:
+                self.play_round()
+
+            global TRAIN_MODE
+            if TRAIN_MODE and not ai_done:
+                continue
+
+            if input("Play another round? (yes/no): ").lower() != "yes" or ai_done:
                 print(f"{bcolors.BOLD}{bcolors.UNDERLINE}\n\nPlayer Balance:{bcolors.ENDC}")
                 for player in self.players + self.bots:
                     print(f"{player.name}: ${player.balance}")
+
+                # save the AI model
+                for bot in self.bots:
+                    if isinstance(bot, TrainableBot):
+                        save_model(bot.q_network, bot.optimizer, "bot_model.pth", additional_data={"epsilon": bot.epsilon})
 
                 if SHOW_GRAPH: parse_log_and_plot(self.log_file)
                 break
@@ -759,10 +806,163 @@ class BlackjackGame:
         '''
         check the shoe to reshuffle
         '''
-        if len(self.shoe) < (len(self.players)+1) * 3:
+        if len(self.shoe) < (len(self.players) + len(self.bots) + 1) * 3:
             print(f"{bcolors.HEADER}[i] Reshuffling Deck{bcolors.ENDC}")
             self.shoe = Shoe(self.num_decks)
             self.shoe.shuffle()
+
+class QNetwork(nn.Module):
+    def __init__(self, state_size, action_size):
+        super(QNetwork, self).__init__()
+        self.fc1 = nn.Linear(state_size, 128)
+        self.fc2 = nn.Linear(128, 64)
+        self.fc3 = nn.Linear(64, action_size)
+
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        return self.fc3(x)
+    
+class TrainableBot(Player):
+    def __init__(self, name, balance, state_size, action_size, epsilon=1.0, epsilon_decay=0.995, epsilon_min=0.01):
+        super().__init__(name, balance)
+        self.q_network = QNetwork(state_size, action_size)
+        self.optimizer = optim.Adam(self.q_network.parameters(), lr=0.001)
+        self.criterion = nn.MSELoss()
+        self.epsilon = epsilon  # Exploration rate
+        self.epsilon_decay = epsilon_decay
+        self.epsilon_min = epsilon_min
+        self.gamma = 0.95  # Discount factor
+        self.memory = []  # Replay buffer
+
+    def get_state(self, hand, dealer_visible_card):
+        # Normalize the hand value and dealer card for the state
+        hand_value = hand.calculate_value() / 21.0
+        # dealer_value = 11 if dealer_visible_card == "Ace" else int(dealer_visible_card) / 11.0
+        dealer_value = get_card_value(dealer_visible_card) / 11.0
+        return np.array([hand_value, dealer_value])
+
+    def choose_action(self, state):
+        if random.random() < self.epsilon:  # Exploration
+            return random.choice(["hit", "stand", "double"])
+        else:  # Exploitation
+            state_tensor = torch.tensor(state, dtype=torch.float32)
+            q_values = self.q_network(state_tensor)
+            return ["hit", "stand", "double"][torch.argmax(q_values).item()]
+
+    def store_experience(self, state, action, reward, next_state, done):
+        self.memory.append((state, action, reward, next_state, done))
+
+    def replay(self, batch_size=32):
+        if len(self.memory) < batch_size:
+            return
+
+        batch = random.sample(self.memory, batch_size)
+        for state, action, reward, next_state, done in batch:
+            state_tensor = torch.tensor(state, dtype=torch.float32)
+            next_state_tensor = torch.tensor(next_state, dtype=torch.float32)
+            reward_tensor = torch.tensor(reward, dtype=torch.float32)
+            done_tensor = torch.tensor(done, dtype=torch.float32)
+
+            q_values = self.q_network(state_tensor)
+            target = q_values.clone().detach()
+
+            action_index = ["hit", "stand", "double"].index(action)
+            if done:
+                target[action_index] = reward
+            else:
+                next_q_values = self.q_network(next_state_tensor)
+                target[action_index] = reward + self.gamma * torch.max(next_q_values)
+
+            self.optimizer.zero_grad()
+            loss = self.criterion(q_values, target)
+            loss.backward()
+            self.optimizer.step()
+
+        # Decay epsilon
+        self.epsilon = max(self.epsilon * self.epsilon_decay, self.epsilon_min)
+
+    def play_turn(self, shoe, dealer_visible_card):
+        self.last_state = None  # Track last state for final reward update
+        self.last_action = None
+        
+        for hand in self.hands:
+            print(f"\n{self.name}'s turn:\n\tCurrent Hand: {hand}")
+            while not hand.is_blackjack() and not hand.is_busted():
+                state = self.get_state(hand, dealer_visible_card)
+                action = self.choose_action(state)
+                print(f"\t{self.name} chooses to {action} (epsilon: {self.epsilon:.3f})")
+                if action == "hit":
+                    card = shoe.draw_card()
+                    hand.add_card(card)
+                    next_state = self.get_state(hand, dealer_visible_card)
+                    if hand.is_busted():
+                        reward = -1
+                        done = True
+                    else:
+                        reward = 0
+                        done = False
+                    self.store_experience(state, "hit", reward, next_state, done)
+                    self.last_state = next_state
+                    self.last_action = "hit"
+                    print(f"\t{self.name} hits: {hand}")
+                elif action == "stand":
+                    # Store state and action, reward will be updated after game ends
+                    self.last_state = state
+                    self.last_action = "stand"
+                    break
+                elif action == "double" and self.balance >= self.current_bet:
+                    self.balance -= self.current_bet
+                    self.current_bet *= 2
+                    card = shoe.draw_card()
+                    hand.add_card(card)
+                    next_state = self.get_state(hand, dealer_visible_card)
+                    if hand.is_busted():
+                        reward = -1
+                    else:
+                        reward = 0
+                    self.store_experience(state, "double", reward, next_state, True)
+                    self.last_state = next_state
+                    self.last_action = "double"
+                    break
+    
+    def update_final_reward(self, result):
+        """Update the final reward based on game outcome"""
+        if self.last_state is None:
+            return
+            
+        # Map result to reward
+        if result == "blackjack":
+            reward = 1.5  # Blackjack pays 3:2
+        elif result == "win":
+            reward = 1.0
+        elif result == "push":
+            reward = 0.0
+        elif result == "lose":
+            reward = -1.0
+        elif result == "busted":
+            reward = -1.0  # Already recorded, but for completeness
+        else:
+            reward = 0.0
+            
+        # Store the final experience with actual game outcome
+        if self.last_action and result != "busted":  # Don't double-count bust
+            self.store_experience(self.last_state, self.last_action, reward, self.last_state, True)
+        
+        # Train on the experiences
+        self.replay()
+
+    def save_model(self, file_path):
+        save_model(
+            self.q_network,
+            self.optimizer,
+            file_path,
+            additional_data={"epsilon": self.epsilon}
+        )
+
+    def load_model(self, file_path):
+        additional_data = load_model(self.q_network, self.optimizer, file_path)
+        self.epsilon = additional_data.get("epsilon", 1.0)
 
 #== Methods =#
 def get_card_value(card_str: str) -> int:
@@ -840,23 +1040,71 @@ def parse_log_and_plot(log_file):
     plt.legend()
     plt.show()
 
+def save_model(model, optimizer, file_path, additional_data=None):
+    """
+    Save the model, optimizer state, and additional metadata.
+
+    Args:
+        model: The PyTorch model to save.
+        optimizer: The optimizer associated with the model.
+        file_path (str): Path to the file where the model should be saved.
+        additional_data (dict): Any additional data to save (e.g., epsilon, training progress).
+    """
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "additional_data": additional_data
+    }
+    torch.save(checkpoint, file_path)
+    print(f"Model saved to {file_path}")
+
+def load_model(model, optimizer, file_path):
+    """
+    Load the model, optimizer state, and additional metadata.
+
+    Args:
+        model: The PyTorch model to load into.
+        optimizer: The optimizer associated with the model.
+        file_path (str): Path to the file where the model is saved.
+
+    Returns:
+        dict: Additional metadata from the saved state.
+    """
+    checkpoint = torch.load(file_path)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    print(f"Model loaded from {file_path}")
+    return checkpoint.get("additional_data", {})
+
+
 #== Main execution ==#
 def main():
+    # argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--train", action='store_true', help="Train AI mode -- no player interaction")
+    args = parser.parse_args()
+
     # import settings
     with open('game_settings.json', 'r') as file:
         settings = json.load(file)
 
     # extract show output
-    global SHOW_OUTPUT, LOG_GAME, SHOW_GRAPH, DEFAULT_BET
+    global SHOW_OUTPUT, LOG_GAME, SHOW_GRAPH, DEFAULT_BET, TRAIN_MODE
     SHOW_OUTPUT = settings["show_output"].lower() == "true"
     LOG_GAME = settings["log_game"].lower() == "true"
     SHOW_GRAPH = settings["show_graph"].lower() == "true"
     DEFAULT_BET = settings["default_bet"]
+    TRAIN_MODE = args.train
 
     # get players
     players = []
     i = 1
+
     while True:
+        # if in train mode, skip
+        if TRAIN_MODE:
+            break
+
         player_i = input(f"Input player {i}'s name ('done' to continue): ")
 
         if player_i != "done":
@@ -878,6 +1126,7 @@ def main():
             file.write("[]")
     else: log_file = 'logs/session_NULL.json'
 
+    # initiate game
     bj_game = BlackjackGame(
         num_decks = settings['num_decks'], 
         player_names = players,
@@ -886,6 +1135,7 @@ def main():
         log_file = log_file
     )
 
+    # play game
     bj_game.play_game()
 
 if __name__ == "__main__":

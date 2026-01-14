@@ -1,14 +1,21 @@
 {
     "num_decks": 7,
-    "init_balance": 100,
+    "init_balance": 500,
     "default_bet": 10,
     "show_output": "True",
     "log_game": "True",
     "show_graph": "True",
     "bots" : [
         {
-            "name": "bot1",
+            "name": "By-The-Books Bot",
             "strategy": "by the books"
+        },
+        {
+            "name": "AI Bot",
+            "strategy": "ai"
         }
-    ]
+    ],
+    "train_param" : {
+        "epochs" : 100
+    }
 }

@@ -1,11 +1,16 @@
-# ignore log files generated
+# ignore log files generated and results
 logs/*
+results/*
 
 # ignore previous work
 old/*
 
-# ignore pycache
+# ignore pycache and venv
 __pycache__/*
+myenv/*
 
 # DS store
 .DS_store
+
+# backup files
+*.bak
