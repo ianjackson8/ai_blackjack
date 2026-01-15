@@ -18,6 +18,7 @@ python3 play_blackjack.py --train
 - `show_output` : \<str\> print to the terminal ("True"/"False")
 - `log_game` : \<str\> save game information to a log file ("True"/"False")
 - `show_graph` : \<str\> show balance throughout play after quitting game ("True"/"False")
+- `deal_delay` : \<float\> time to deal cards (set to 0 for no delay)
 - `bots` : \<List[dict]> information of bots to play alongside player
   - `name` : \<str\> name of the bot
   - `strategy` : \<str\> playing strategy (options below)
@@ -35,6 +36,10 @@ The AI bot uses reinforcement learning (Q-learning) to learn optimal blackjack s
 - **Model Persistence**: Saves/loads from `bot_model.pth` to continue learning across sessions
 
 # Changelog
+- v2.1 
+  - add deal delay to simulate drawing cards
+  - add hotkeys for player action
+  - fix play again to only take only yes/no
 - v2.0
   - add trainable AI bot using Q-learning and PyTorch neural network
   - add support for multiple bot types from settings (regular bots + AI bots)

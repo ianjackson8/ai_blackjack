@@ -5,6 +5,7 @@
     "show_output": "True",
     "log_game": "True",
     "show_graph": "True",
+    "deal_delay": 0,
     "bots" : [
         {
             "name": "By-The-Books Bot",

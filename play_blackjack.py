@@ -3,10 +3,9 @@
 Play blackjack in terminal
 
 Author: Ian Jackson
-Version v1.2
+Version v2.1
 
 '''
-#== todo list ==#
 
 #== Imports ==#
 import random
@@ -14,10 +13,11 @@ import os
 import json
 import argparse
 import torch 
+import time
 
 import numpy as np
-import torch.nn as nn 
-import torch.optim as optim 
+import torch.nn as nn           # type: ignore 
+import torch.optim as optim     # type: ignore 
 import matplotlib.pyplot as plt 
 
 from typing import List, Union
@@ -354,7 +354,7 @@ class Bot(Player):
         super().__init__(name, balance)
         self.strategy = strategy
 
-    def play_turn(self, shoe: Shoe, dealer_visible_card: str):
+    def play_turn(self, shoe: Shoe, dealer_visible_card: str, deal_delay: int):
         '''
         play a bots turn
 
@@ -371,6 +371,7 @@ class Bot(Player):
                 if action == "hit":
                     card = shoe.draw_card()
                     hand.add_card(card)
+                    time.sleep(deal_delay)
                     print(f"\t{self.name} hits: {hand}")
                 elif action == "stand":
                     break
@@ -380,6 +381,7 @@ class Bot(Player):
                         self.current_bet *= 2
                         card = shoe.draw_card()
                         hand.add_card(card)
+                        time.sleep(deal_delay)
                         print(f"\t{self.name} doubles: {hand}")
                         break  # Doubling ends the turn
                     else:
@@ -488,7 +490,8 @@ class Bot(Player):
             raise ValueError(f"{bcolors.FAIL}[ERR] Invalid bot strategy {self.strategy}.{bcolors.ENDC}")
 
 class BlackjackGame:
-    def __init__(self, num_decks: int, player_names: List[str], bot_info: List[dict], starting_balance: int, log_file: str):
+    def __init__(self, num_decks: int, player_names: List[str], bot_info: List[dict], starting_balance: int, log_file: str,
+                 deal_delay: int):
         '''
         init the game with a shoe, dealer, and players
         shuffles deck
@@ -499,12 +502,14 @@ class BlackjackGame:
             bot_info: (List[dict]): bot name and play strategy
             starting_balance (int): initial balance for each player
             log_file (str): path of the logfile
+            deal_delay (int): time (in seconds) for a card to deal
         '''
         self.num_decks = num_decks
         self.shoe = Shoe(num_decks)
         self.shoe.shuffle()
         self.dealer = Player("Dealer", balance=0)
         self.players = [Player(name, starting_balance) for name in player_names]
+        self.deal_delay = deal_delay
         
         # Initialize bots from settings
         self.bots = []
@@ -550,6 +555,8 @@ class BlackjackGame:
             # Only deal cards to players who bet
             if player.current_bet > 0:  
                 for _ in range(2):
+                    # NOTE: split debug
+                    # player.hit(Card("2", "Hearts"))
                     player.hit(self.shoe.draw_card())
         for _ in range(2):
             self.dealer.hit(self.shoe.draw_card())
@@ -593,10 +600,23 @@ class BlackjackGame:
                     print(f"\t{bcolors.BOLD}{bcolors.FAIL}Busted!{bcolors.ENDC}")
                     break
 
-                action = input("\tChoose action (hit/stand/double/split): ").lower()
+                action = input("\tChoose action (1=hit / 2=stand / 3=double / 4=split): ").lower()
+
+                # Map hotkeys to actions
+                if action == "1":
+                    action = "hit"
+                elif action == "2":
+                    action = "stand"
+                elif action == "3":
+                    action = "double"
+                elif action == "4":
+                    action = "split"
 
                 if action == "hit":
+                    # NOTE: split feature
+                    # hand.add_card(Card("2", "Hearts"))
                     hand.add_card(self.shoe.draw_card())
+                    time.sleep(self.deal_delay)
                     player.log_action("hit", dealer_visible_card)
                 elif action == "stand":
                     player.log_action("stand", dealer_visible_card)
@@ -635,6 +655,7 @@ class BlackjackGame:
         print(f"\nDealer's turn:\n\tCurrent Hand: {self.dealer.hands[0]}")
         while self.dealer.hands[0].calculate_value() < 17:
             self.dealer.hands[0].add_card(self.shoe.draw_card())
+            time.sleep(self.deal_delay)
             print(f"\tDealer hits: {self.dealer.hands[0]}")
 
         if self.dealer.hands[0].is_busted():
@@ -710,7 +731,7 @@ class BlackjackGame:
         for player in self.players + self.bots:
             if player.current_bet > 0:  # Only allow turns for players who bet
                 if isinstance(player, Bot) or isinstance(player, TrainableBot):
-                    player.play_turn(self.shoe, str(self.dealer.hands[0].cards[1]))
+                    player.play_turn(self.shoe, str(self.dealer.hands[0].cards[1]), self.deal_delay)
                 else:
                     self.player_turn(player)
 
@@ -752,7 +773,15 @@ class BlackjackGame:
             if TRAIN_MODE and not ai_done:
                 continue
 
-            if input("Play another round? (yes/no): ").lower() != "yes" or ai_done:
+            # Ask if player wants to continue
+            while True:
+                play_again = input("Play another round? (yes/no): ").lower()
+                if play_again in ["yes", "no"]:
+                    break
+                else:
+                    print(f"{bcolors.FAIL}[ERR] Invalid input. Please enter 'yes' or 'no'.{bcolors.ENDC}")
+
+            if play_again != "yes" or ai_done:
                 print(f"{bcolors.BOLD}{bcolors.UNDERLINE}\n\nPlayer Balance:{bcolors.ENDC}")
                 for player in self.players + self.bots:
                     print(f"{player.name}: ${player.balance}")
@@ -882,7 +911,7 @@ class TrainableBot(Player):
         # Decay epsilon
         self.epsilon = max(self.epsilon * self.epsilon_decay, self.epsilon_min)
 
-    def play_turn(self, shoe, dealer_visible_card):
+    def play_turn(self, shoe, dealer_visible_card, deal_delay: int):
         self.last_state = None  # Track last state for final reward update
         self.last_action = None
         
@@ -905,6 +934,7 @@ class TrainableBot(Player):
                     self.store_experience(state, "hit", reward, next_state, done)
                     self.last_state = next_state
                     self.last_action = "hit"
+                    time.sleep(deal_delay)
                     print(f"\t{self.name} hits: {hand}")
                 elif action == "stand":
                     # Store state and action, reward will be updated after game ends
@@ -1132,7 +1162,8 @@ def main():
         player_names = players,
         bot_info = settings['bots'],
         starting_balance = settings['init_balance'],
-        log_file = log_file
+        log_file = log_file,
+        deal_delay = settings['deal_delay']
     )
 
     # play game
