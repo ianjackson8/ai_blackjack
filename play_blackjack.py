@@ -376,7 +376,7 @@ class Bot(Player):
                 elif action == "stand":
                     break
                 elif action == "double":
-                    if self.balance >= self.current_bet:  # Ensure enough balance to double
+                    if float(self.balance) >= float(self.current_bet):  # Ensure enough balance to double
                         self.balance -= self.current_bet
                         self.current_bet *= 2
                         card = shoe.draw_card()
@@ -714,6 +714,9 @@ class BlackjackGame:
                         global DEFAULT_BET
                         bet = min(DEFAULT_BET, player.balance)
 
+                        # if the bot is broke, dont allow play
+                        if float(bet) == float(0): break
+
                         player.place_bet(bet)
                         break
                     else: # player
@@ -764,12 +767,14 @@ class BlackjackGame:
             self.display_players()
             print()
 
-            if self.bots[0].balance <= 10:
+            # training end condition 
+            global DEFAULT_BET
+            global TRAIN_MODE
+            if (self.bots[0].balance <= DEFAULT_BET) and TRAIN_MODE:
                 ai_done = True
             else:
                 self.play_round()
 
-            global TRAIN_MODE
             if TRAIN_MODE and not ai_done:
                 continue
 

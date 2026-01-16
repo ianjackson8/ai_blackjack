@@ -5,10 +5,10 @@
     "show_output": "True",
     "log_game": "True",
     "show_graph": "True",
-    "deal_delay": 0,
+    "deal_delay": 1.5,
     "bots" : [
         {
-            "name": "By-The-Books Bot",
+            "name": "BTB Bot",
             "strategy": "by the books"
         },
         {

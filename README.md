@@ -36,6 +36,8 @@ The AI bot uses reinforcement learning (Q-learning) to learn optimal blackjack s
 - **Model Persistence**: Saves/loads from `bot_model.pth` to continue learning across sessions
 
 # Changelog
+- v2.2
+  - fix game ending on first bot going broke
 - v2.1 
   - add deal delay to simulate drawing cards
   - add hotkeys for player action
