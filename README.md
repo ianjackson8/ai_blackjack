@@ -36,6 +36,8 @@ The AI bot uses reinforcement learning (Q-learning) to learn optimal blackjack s
 - **Model Persistence**: Saves/loads from `bot_model.pth` to continue learning across sessions
 
 # Changelog
+- v3.0
+  - 
 - v2.2
   - fix bot being able to double after a hit
   - fix game ending on first bot going broke

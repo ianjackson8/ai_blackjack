@@ -3,7 +3,7 @@
 Play blackjack in terminal
 
 Author: Ian Jackson
-Version v2.1
+Version v3.0
 '''
 
 #== Imports ==#
