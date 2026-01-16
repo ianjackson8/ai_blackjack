@@ -720,7 +720,21 @@ class BlackjackGame:
                         player.place_bet(bet)
                         break
                     else: # player
-                        bet = int(input(f"{bcolors.BOLD}{player.name}{bcolors.ENDC}, Enter bet amount: "))
+                        is_bet = False
+                        while not is_bet:
+                            bet = input(f"{bcolors.BOLD}{player.name}{bcolors.ENDC}, Enter bet amount: ")
+
+                            # if "bet" starts with a / then parse as a command
+                            if bet[0] == '/':
+                                self.parse_command(bet[1:])
+                            else: is_bet = True
+
+                        # parse bet as integer if no command
+                        try:
+                            bet = int(bet)
+                        except:
+                            raise ValueError(f"{bcolors.FAIL}[ERR] Bet must be a number.{bcolors.ENDC}")
+
                         if bet > 0:
                             player.place_bet(bet)
                         break
@@ -787,16 +801,7 @@ class BlackjackGame:
                     print(f"{bcolors.FAIL}[ERR] Invalid input. Please enter 'yes' or 'no'.{bcolors.ENDC}")
 
             if play_again != "yes" or ai_done:
-                print(f"{bcolors.BOLD}{bcolors.UNDERLINE}\n\nPlayer Balance:{bcolors.ENDC}")
-                for player in self.players + self.bots:
-                    print(f"{player.name}: ${player.balance}")
-
-                # save the AI model
-                for bot in self.bots:
-                    if isinstance(bot, TrainableBot):
-                        save_model(bot.q_network, bot.optimizer, "bot_model.pth", additional_data={"epsilon": bot.epsilon})
-
-                if SHOW_GRAPH: parse_log_and_plot(self.log_file)
+                self.end_game()
                 break
 
     def log_game(self):
@@ -844,6 +849,89 @@ class BlackjackGame:
             print(f"{bcolors.HEADER}[i] Reshuffling Deck{bcolors.ENDC}")
             self.shoe = Shoe(self.num_decks)
             self.shoe.shuffle()
+
+    def end_game(self):
+        '''
+        End the game
+        '''
+        print(f"{bcolors.BOLD}{bcolors.UNDERLINE}\n\nPlayer Balance:{bcolors.ENDC}")
+        for player in self.players + self.bots:
+            print(f"{player.name}: ${player.balance}")
+        print()
+
+        # save the AI model
+        for bot in self.bots:
+            if isinstance(bot, TrainableBot):
+                save_model(bot.q_network, bot.optimizer, "bot_model.pth", additional_data={"epsilon": bot.epsilon})
+
+        global SHOW_GRAPH
+        if SHOW_GRAPH: parse_log_and_plot(self.log_file)
+
+    def parse_command(self, command: str):
+        '''
+        Parse user command from bet line
+
+        Args:
+            command (str): command to be parsed
+        '''
+        if command == 'help':
+            print(f"{bcolors.BOLD}{bcolors.UNDERLINE}Available commands:{bcolors.ENDC}")
+            print('\t/help                                  Prints this message')
+            print('\t/exit                                  Quits the game')
+            print('\t/graph                                 Displays current player balance graph')
+            print('\t/editbalance [player] [new balance]    Modify a players balance')
+            print('\t/showbalance                           Display the players balance')
+        elif command == 'exit':
+            self.end_game()
+            quit()
+        elif command == 'graph':
+            parse_log_and_plot(self.log_file)
+        elif command.split()[0] == 'editbalance':
+            # Parse: /editbalance [player name] [new balance]
+            # Last token is balance, everything else is player name (allows spaces)
+            parts = command.split()
+            
+            if len(parts) < 3:
+                print(f"{bcolors.FAIL}[ERR] Invalid format. Usage: /editbalance [player name] [new balance]{bcolors.ENDC}")
+                return
+            
+            # Last part is balance, everything between is player name
+            new_balance_str = parts[-1]
+            player_name = ' '.join(parts[1:-1])
+            
+            # Find the player
+            target_player = None
+            for player in self.players + self.bots:
+                if player.name.lower() == player_name.lower():
+                    target_player = player
+                    break
+            
+            if target_player is None:
+                print(f"{bcolors.FAIL}[ERR] Player '{player_name}' not found.{bcolors.ENDC}")
+                return
+            
+            # Validate and set new balance
+            try:
+                new_balance = float(new_balance_str)
+                if new_balance < 0:
+                    print(f"{bcolors.FAIL}[ERR] Balance cannot be negative.{bcolors.ENDC}")
+                    return
+                
+                old_balance = target_player.balance
+                target_player.balance = new_balance
+                print(f"{bcolors.OKGREEN}[✓] {target_player.name}'s balance updated: ${old_balance} → ${new_balance}{bcolors.ENDC}")
+                
+            except ValueError:
+                print(f"{bcolors.FAIL}[ERR] Invalid balance amount. Must be a number.{bcolors.ENDC}")
+        elif command == 'showbalance':
+            print(f"{bcolors.BOLD}{bcolors.UNDERLINE}\nPlayer Balance:{bcolors.ENDC}")
+            for player in self.players + self.bots:
+                print(f"{player.name}: ${player.balance}")
+            print()
+        else:
+            print(f"{bcolors.FAIL}[ERR] Invalid command -- run /help for list of commands.{bcolors.ENDC}")
+        return
+
 
 class QNetwork(nn.Module):
     def __init__(self, state_size, action_size):
@@ -1035,45 +1123,48 @@ def parse_log_and_plot(log_file):
     # Extract balance and round number
     with open('game_settings.json', 'r') as file:
             settings = json.load(file)
+    
+    try:
+        init_bal = settings["init_balance"]
 
-    init_bal = settings["init_balance"]
+        # Extract balance and round number for all players
+        player_balances = {}
 
-    # Extract balance and round number for all players
-    player_balances = {}
-
-    players = logs[0].get("players", [])
-    for player in players:
-        name = player.get("name")
-        player_balances[name] = []
-        player_balances[name].append((0, init_bal))
-
-    for round_number, entry in enumerate(logs, start=1):
-        players = entry.get("players", [])
+        players = logs[0].get("players", [])
         for player in players:
             name = player.get("name")
-            balance = player.get("balance")
-            if name and balance is not None:
-                if name not in player_balances:
-                    player_balances[name] = []
+            player_balances[name] = []
+            player_balances[name].append((0, init_bal))
 
-                if round_number == 0:
-                    player_balances[name].append((0, init_bal))
-                else:
-                    player_balances[name].append((round_number, balance))
+        for round_number, entry in enumerate(logs, start=1):
+            players = entry.get("players", [])
+            for player in players:
+                name = player.get("name")
+                balance = player.get("balance")
+                if name and balance is not None:
+                    if name not in player_balances:
+                        player_balances[name] = []
 
-    # Plotting
-    plt.figure(figsize=(10, 6))
+                    if round_number == 0:
+                        player_balances[name].append((0, init_bal))
+                    else:
+                        player_balances[name].append((round_number, balance))
 
-    for player, rounds_and_balances in player_balances.items():
-        rounds, balances = zip(*rounds_and_balances)
-        plt.plot(rounds, balances, marker='o', linestyle='-', label=player)
+        # Plotting
+        plt.figure(figsize=(10, 6))
 
-    plt.title("Player Balances Over Rounds")
-    plt.xlabel("Round Number")
-    plt.ylabel("Balance")
-    plt.grid(True)
-    plt.legend()
-    plt.show()
+        for player, rounds_and_balances in player_balances.items():
+            rounds, balances = zip(*rounds_and_balances)
+            plt.plot(rounds, balances, marker='o', linestyle='-', label=player)
+
+        plt.title("Player Balances Over Rounds")
+        plt.xlabel("Round Number")
+        plt.ylabel("Balance")
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+    except IndexError:
+        print(f'{bcolors.WARNING}[W] Cannot create graph, no data{bcolors.ENDC}')
 
 def save_model(model, optimizer, file_path, additional_data=None):
     """

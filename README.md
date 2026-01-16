@@ -26,6 +26,13 @@ python3 play_blackjack.py --train
     - "by the books" - plays based on best odds table
     - "ai" - trainable reinforcement learning bot using Q-learning
 
+## Commands
+- `/help` - display available commands
+- `/exit` - quit the game
+- `/graph` - display player balance graph
+- `/editbalance [player] [new balance]` - set a players balance
+- `/showbalance` - shows the current balance of all players
+
 ## AI Bot
 The AI bot uses reinforcement learning (Q-learning) to learn optimal blackjack strategy:
 - **Neural Network**: 3-layer network (128→64→3 neurons) that learns Q-values for actions
@@ -37,7 +44,7 @@ The AI bot uses reinforcement learning (Q-learning) to learn optimal blackjack s
 
 # Changelog
 - v3.0
-  - 
+  - add commands at the betting input (run `/help` to see available commands)
 - v2.2
   - fix bot being able to double after a hit
   - fix game ending on first bot going broke
