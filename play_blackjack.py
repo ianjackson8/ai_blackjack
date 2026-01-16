@@ -1236,7 +1236,6 @@ def load_model(model, optimizer, file_path):
     print(f"Model loaded from {file_path}")
     return checkpoint.get("additional_data", {})
 
-
 #== Main execution ==#
 def main():
     # argparse
