@@ -12,8 +12,8 @@
             "strategy": "by the books"
         },
         {
-            "name": "AI Bot",
-            "strategy": "ai"
+            "name": "NN Bot",
+            "strategy": "ai-nn"
         }
     ],
     "train_param" : {

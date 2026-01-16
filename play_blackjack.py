@@ -518,7 +518,7 @@ class BlackjackGame:
         # Initialize bots from settings
         self.bots = []
         for bot in bot_info:
-            if bot.get('strategy') == 'ai':
+            if bot.get('strategy') == 'ai-nn':
                 self.bots.append(TrainableBot(bot['name'], starting_balance, 2, 3))
             else:
                 self.bots.append(Bot(bot['name'], starting_balance, bot['strategy']))
@@ -527,11 +527,16 @@ class BlackjackGame:
         self.round_data = {}
         self.game_num = 0
 
+        # create models dir if it doesnt exist
+        if not os.path.exists("models"):
+            os.makedirs("models")
+
         # Load AI bot models if they exist
         for bot in self.bots:
             if isinstance(bot, TrainableBot):
                 try:
-                    additional_data = load_model(bot.q_network, bot.optimizer, "bot_model.pth")
+                    bot_name = bot.name.replace(" ", "_")
+                    additional_data = load_model(bot.q_network, bot.optimizer, f"models/{bot_name}_model.pth")
                     bot.epsilon = additional_data.get("epsilon", 1.0)  # Default to 1.0 if not found
                 except FileNotFoundError as e:
                     print(f"{bcolors.OKBLUE}[i] AI Save not found, creating new AI. {bcolors.ENDC}")
@@ -872,7 +877,8 @@ class BlackjackGame:
         # save the AI model
         for bot in self.bots:
             if isinstance(bot, TrainableBot):
-                save_model(bot.q_network, bot.optimizer, "bot_model.pth", additional_data={"epsilon": bot.epsilon})
+                bot_name = bot.name.replace(" ", "_")
+                save_model(bot.q_network, bot.optimizer, f"models/{bot_name}_model.pth", additional_data={"epsilon": bot.epsilon})
 
         global SHOW_GRAPH
         if SHOW_GRAPH: parse_log_and_plot(self.log_file)
