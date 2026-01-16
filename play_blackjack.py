@@ -389,8 +389,15 @@ class Bot(Player):
                         print(f"\t{self.name} doubles: {hand}")
                         break  # Doubling ends the turn
                     else:
-                        print(f"\t{bcolors.OKBLUE}[i] cannot double due to insufficient balance.{bcolors.ENDC}")
-                        action = "hit"  # Fall back to hitting if double is not possible
+                        if self.hands[0].num_cards() > 2:
+                            print(f"\t{bcolors.OKBLUE}[i] cannot double after hitting.{bcolors.ENDC}")
+                        else:
+                            print(f"\t{bcolors.OKBLUE}[i] cannot double due to insufficient balance.{bcolors.ENDC}")
+                        # Fall back to hitting if double is not possible
+                        card = shoe.draw_card()
+                        hand.add_card(card)
+                        time.sleep(deal_delay)
+                        print(f"\t{self.name} hits: {hand}")
                 else:
                     print(f"{bcolors.FAIL} Invalid action: {action} {bcolors.ENDC}")
 
