@@ -28,6 +28,7 @@ LOG_GAME = True
 SHOW_GRAPH = True
 DEFAULT_BET = 10
 TRAIN_MODE = False
+GOD_MODE = False
 
 #== Classes ==#
 class bcolors:
@@ -142,11 +143,14 @@ class Shoe():
         return len(self.cards)
 
 class Hand():
-    def __init__(self):
+    def __init__(self, hand: list[Card] = None):
         '''
         initializes an empty hand
         ''' 
-        self.cards = []
+        if hand == None:
+            self.cards = []
+        else:
+            self.cards = hand
 
     def add_card(self, card: Card):
         '''
@@ -551,12 +555,15 @@ class BlackjackGame:
         '''
         deal two cards to each player who has placed bets and dealer
         '''
+        global GOD_MODE
         for player in self.players + self.bots:
             # Only deal cards to players who bet
             if player.current_bet > 0:  
                 for _ in range(2):
-                    # NOTE: split debug
-                    # player.hit(Card("2", "Hearts"))
+                    if GOD_MODE and not (isinstance(player, Bot) or isinstance(player, TrainableBot)):
+                        player.hands = [Hand([Card("Ace", "Hearts"), Card("King", "Hearts")])]
+                        continue
+
                     player.hit(self.shoe.draw_card())
         for _ in range(2):
             self.dealer.hit(self.shoe.draw_card())
@@ -841,11 +848,14 @@ class BlackjackGame:
         with open(self.log_file, "w") as file:
             json.dump(logs, file, indent=4)
 
-    def check_shoe(self):
+    def check_shoe(self, force: bool = False):
         '''
         check the shoe to reshuffle
+
+        Args:
+            force (bool): force a reshuffle (Default False)
         '''
-        if len(self.shoe) < (len(self.players) + len(self.bots) + 1) * 3:
+        if (len(self.shoe) < (len(self.players) + len(self.bots) + 1) * 3) or force:
             print(f"{bcolors.HEADER}[i] Reshuffling Deck{bcolors.ENDC}")
             self.shoe = Shoe(self.num_decks)
             self.shoe.shuffle()
@@ -881,11 +891,15 @@ class BlackjackGame:
             print('\t/graph                                 Displays current player balance graph')
             print('\t/editbalance [player] [new balance]    Modify a players balance')
             print('\t/showbalance                           Display the players balance')
+            print('\t/shuffle                               Shuffles and resets the deck')
+
         elif command == 'exit':
             self.end_game()
             quit()
+
         elif command == 'graph':
             parse_log_and_plot(self.log_file)
+
         elif command.split()[0] == 'editbalance':
             # Parse: /editbalance [player name] [new balance]
             # Last token is balance, everything else is player name (allows spaces)
@@ -928,6 +942,20 @@ class BlackjackGame:
             for player in self.players + self.bots:
                 print(f"{player.name}: ${player.balance}")
             print()
+
+        elif command == 'shuffle':
+            self.check_shoe(force=True)
+
+        elif command.split()[0] == 'godmode':
+            global GOD_MODE
+            parts = command.split()
+            if parts[-1] == "on":
+                GOD_MODE = True
+                print(f"{bcolors.HEADER}[i] GOD MODE ON{bcolors.ENDC}")
+            elif parts[-1] == "off":
+                GOD_MODE = False
+                print(f"{bcolors.HEADER}[i] GOD MODE OFF{bcolors.ENDC}")
+
         else:
             print(f"{bcolors.FAIL}[ERR] Invalid command -- run /help for list of commands.{bcolors.ENDC}")
         return

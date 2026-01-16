@@ -32,6 +32,7 @@ python3 play_blackjack.py --train
 - `/graph` - display player balance graph
 - `/editbalance [player] [new balance]` - set a players balance
 - `/showbalance` - shows the current balance of all players
+- `/shuffle` - shuffle the deck
 
 ## AI Bot
 The AI bot uses reinforcement learning (Q-learning) to learn optimal blackjack strategy:
