@@ -37,6 +37,7 @@ The AI bot uses reinforcement learning (Q-learning) to learn optimal blackjack s
 
 # Changelog
 - v2.2
+  - fix bot being able to double after a hit
   - fix game ending on first bot going broke
 - v2.1 
   - add deal delay to simulate drawing cards

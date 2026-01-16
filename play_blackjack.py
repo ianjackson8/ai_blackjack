@@ -376,7 +376,8 @@ class Bot(Player):
                 elif action == "stand":
                     break
                 elif action == "double":
-                    if float(self.balance) >= float(self.current_bet):  # Ensure enough balance to double
+                    # Ensure enough balance to double AND only on first action
+                    if (float(self.balance) >= float(self.current_bet)) and (self.hands[0].num_cards() == 2):  
                         self.balance -= self.current_bet
                         self.current_bet *= 2
                         card = shoe.draw_card()
