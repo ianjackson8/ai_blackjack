@@ -45,6 +45,7 @@ The AI bot uses reinforcement learning (Q-learning) to learn optimal blackjack s
 
 # Changelog
 - v3.0
+  - fix BTB bot causing an infinite loop when doubling
   - add saving AI models under their name, under `models/` directory
   - add commands at the betting input (run `/help` to see available commands)
 - v2.2
