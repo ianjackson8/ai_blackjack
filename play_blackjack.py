@@ -1023,7 +1023,7 @@ class BlackjackGame:
             quit()
 
         elif command == 'graph':
-            parse_log_and_plot(self.log_file)
+            parse_log_and_plot(self.log_file, block=False)
 
         elif command.split()[0] == 'editbalance':
             # Parse: /editbalance [player name] [new balance]
@@ -1273,7 +1273,7 @@ def get_card_value(card_str: str) -> int:
     else:
         return int(rank)  # Numeric cards retain their values
 
-def parse_log_and_plot(log_file):
+def parse_log_and_plot(log_file, block=True):
     try:
         with open(log_file, 'r') as file:
             logs = json.load(file)
@@ -1326,7 +1326,7 @@ def parse_log_and_plot(log_file):
         plt.ylabel("Balance")
         plt.grid(True)
         plt.legend()
-        plt.show()
+        plt.show(block=block)
     except IndexError:
         print(f'{bcolors.WARNING}[W] Cannot create graph, no data{bcolors.ENDC}')
 
@@ -1385,6 +1385,10 @@ def main():
     SHOW_GRAPH = bool(settings["show_graph"])
     DEFAULT_BET = settings["default_bet"]
     TRAIN_MODE = args.train
+
+    if SHOW_GRAPH and not LOG_GAME:
+        print(f"{bcolors.WARNING}[W] show_graph is enabled but log_game is false — graph will be skipped.{bcolors.ENDC}")
+        SHOW_GRAPH = False
 
     if TRAIN_MODE and not settings.get('bots'):
         print(f"{bcolors.FAIL}[ERR] Train mode requires at least one bot configured in game_settings.json.{bcolors.ENDC}")
