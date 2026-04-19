@@ -234,8 +234,9 @@ class Player:
         self.balance = balance
         self.hands = [Hand()]  # A player starts with one hand
         self.current_bet = 0
+        self.hand_bets = []
         self.actions = []
-        self.result = ""
+        self.results = []
 
     def log_action(self, action: str, dealer_visible_card: str):
         '''
@@ -269,6 +270,7 @@ class Player:
         if amount > self.balance:
             raise ValueError(f"{bcolors.FAIL}Bet amount exceeds available balance.{bcolors.ENDC}")
         self.current_bet = amount
+        self.hand_bets = [amount]
         self.balance -= amount
 
     def hit(self, card: Card) -> None:
@@ -315,14 +317,16 @@ class Player:
         new_hand = Hand()
         new_hand.add_card(card2)
         self.hands.insert(hand_index + 1, new_hand)
+        self.hand_bets.insert(hand_index + 1, self.current_bet)
 
-    def double_down(self, card: Card, hand: Hand = None):
+    def double_down(self, card: Card, hand: Hand = None, hand_index: int = None):
         '''
         Double down and take one card
 
         Args:
             card (Card): card to be taken
             hand (Hand): the specific hand to double on (defaults to last hand)
+            hand_index (int): index of the hand to double on (defaults to last hand)
 
         Raises:
             ValueError: if the player has insufficient funds
@@ -331,13 +335,16 @@ class Player:
         if hand is None:
             hand = self.hands[-1]
 
-        if self.current_bet > self.balance:
-            raise ValueError(f"{bcolors.FAIL}[ERR] Insufficient balance to double down.{bcolors.ENDC}")
         if hand.num_cards() != 2:
             raise ValueError(f"{bcolors.FAIL}[ERR] Cannot double down after a hit.{bcolors.ENDC}")
 
-        self.balance -= self.current_bet
-        self.current_bet *= 2
+        if hand_index is None:
+            hand_index = len(self.hands) - 1
+        bet = self.hand_bets[hand_index] if self.hand_bets else self.current_bet
+        if bet > self.balance:
+            raise ValueError(f"{bcolors.FAIL}[ERR] Insufficient balance to double down.{bcolors.ENDC}")
+        self.balance -= bet
+        self.hand_bets[hand_index] = bet * 2
         hand.add_card(card)
 
     def reset_for_new_round(self):
@@ -346,8 +353,9 @@ class Player:
         '''
         self.hands = [Hand()]
         self.current_bet = 0
+        self.hand_bets = []
         self.actions = []  # Clear the cache for the new round
-        self.result = ""
+        self.results = []
 
     def __repr__(self) -> str:
         '''
@@ -396,8 +404,9 @@ class Bot(Player):
                 elif action == "double":
                     # Ensure enough balance to double AND only on first action
                     if (float(self.balance) >= float(self.current_bet)) and (hand.num_cards() == 2):
-                        self.balance -= self.current_bet
-                        self.current_bet *= 2
+                        bet = self.hand_bets[0] if self.hand_bets else self.current_bet
+                        self.balance -= bet
+                        self.hand_bets[0] = bet * 2
                         card = shoe.draw_card()
                         hand.add_card(card)
                         time.sleep(deal_delay)
@@ -698,7 +707,7 @@ class BlackjackGame:
                         print(f"\t{bcolors.FAIL}Cannot double down after splitting (disabled in settings).{bcolors.ENDC}")
                     else:
                         try:
-                            player.double_down(self.shoe.draw_card(), hand)
+                            player.double_down(self.shoe.draw_card(), hand, hand_index)
                             player.log_action("double", dealer_visible_card)
                         except ValueError as e:
                             print(f"\t{e}")
@@ -752,32 +761,33 @@ class BlackjackGame:
         dealer_value = self.dealer.hands[0].calculate_value()
         # print(f"Dealer's hand: {dealer_value}")
 
-        for hand in player.hands:
+        for i, hand in enumerate(player.hands):
+            bet = player.hand_bets[i] if player.hand_bets and i < len(player.hand_bets) else player.current_bet
             player_value = hand.calculate_value()
             if hand.is_busted():
-                print(f"{player.name}'s hand: {player_value} => {bcolors.BOLD}{bcolors.FAIL}Busted! Lost ${player.current_bet}.{bcolors.ENDC}")
-                player.result = "busted"
+                print(f"{player.name}'s hand: {player_value} => {bcolors.BOLD}{bcolors.FAIL}Busted! Lost ${bet}.{bcolors.ENDC}")
+                player.results.append("busted")
 
             elif hand.is_blackjack():
-                winnings = player.current_bet * 2.5
+                winnings = bet * 2.5
                 player.balance += winnings
                 print(f"{player.name}'s hand: {player_value}. => {bcolors.BOLD}{bcolors.OKGREEN}Blackjack! You win ${winnings}.{bcolors.ENDC}")
-                player.result = "blackjack"
+                player.results.append("blackjack")
 
             elif dealer_value > 21 or player_value > dealer_value:
-                winnings = player.current_bet * 2
+                winnings = bet * 2
                 player.balance += winnings
                 print(f"{player.name}'s hand: {player_value}. => {bcolors.BOLD}{bcolors.OKGREEN}Win! You win ${winnings}.{bcolors.ENDC}")
-                player.result = "win"
+                player.results.append("win")
 
             elif player_value == dealer_value:
-                player.balance += player.current_bet
-                print(f"{player.name}'s hand: {player_value}. => {bcolors.BOLD}{bcolors.OKBLUE}Push. ${player.current_bet} returned.{bcolors.ENDC}")
-                player.result = "push"
+                player.balance += bet
+                print(f"{player.name}'s hand: {player_value}. => {bcolors.BOLD}{bcolors.OKBLUE}Push. ${bet} returned.{bcolors.ENDC}")
+                player.results.append("push")
 
             else:
-                print(f"{player.name}'s hand: {player_value}. => {bcolors.BOLD}{bcolors.FAIL}Lose. Lost ${player.current_bet}.{bcolors.ENDC}")
-                player.result = "lose"
+                print(f"{player.name}'s hand: {player_value}. => {bcolors.BOLD}{bcolors.FAIL}Lose. Lost ${bet}.{bcolors.ENDC}")
+                player.results.append("lose")
 
     def play_round(self) -> None:
         ''''
@@ -845,7 +855,7 @@ class BlackjackGame:
                 self.determine_winner(player)
                 # Update AI bot with final reward
                 if isinstance(player, TrainableBot):
-                    player.update_final_reward(player.result)
+                    player.update_final_reward(player.results[0] if player.results else "")
 
         # Track balance history for save/graph
         for player in self.players + self.bots:
@@ -909,9 +919,14 @@ class BlackjackGame:
                 "name": player.name,
                 "bet": player.current_bet,
                 "actions": player.actions,
-                "final_hand": [str(card) for card in player.hands[0].cards],
-                "final_value": player.hands[0].calculate_value(),
-                "result": player.result,
+                "hands": [
+                    {
+                        "final_hand": [str(card) for card in hand.cards],
+                        "final_value": hand.calculate_value(),
+                    }
+                    for hand in player.hands
+                ],
+                "results": player.results,
                 "balance": player.balance
             }
             log_entry["players"].append(player_log)
@@ -1199,8 +1214,9 @@ class TrainableBot(Player):
                     self.last_action = "stand"
                     break
                 elif action == "double" and self.balance >= self.current_bet:
-                    self.balance -= self.current_bet
-                    self.current_bet *= 2
+                    bet = self.hand_bets[0] if self.hand_bets else self.current_bet
+                    self.balance -= bet
+                    self.hand_bets[0] = bet * 2
                     card = shoe.draw_card()
                     hand.add_card(card)
                     next_state = self.get_state(hand, dealer_visible_card)
