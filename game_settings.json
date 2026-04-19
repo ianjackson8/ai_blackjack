@@ -2,10 +2,12 @@
     "num_decks": 7,
     "init_balance": 500,
     "default_bet": 10,
-    "show_output": "True",
-    "log_game": "True",
-    "show_graph": "True",
+    "show_output": true,
+    "log_game": true,
+    "show_graph": true,
     "deal_delay": 1.5,
+    "allow_double_after_split": true,
+    "split_limit": -1,
     "bots" : [
         {
             "name": "BTB Bot",

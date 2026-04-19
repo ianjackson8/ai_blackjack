@@ -14,3 +14,12 @@ myenv/*
 
 # backup files
 *.bak
+
+# saves
+saves/*
+
+# claude
+CLAUDE.md
+
+# tests 
+tests/*

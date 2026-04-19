@@ -286,44 +286,59 @@ class Player:
         '''
         pass
 
-    def split(self) -> None:
+    def split(self, hand_index: int = 0) -> None:
         '''
         splits the player's hand (if possible)
 
+        Args:
+            hand_index (int): index of the hand to split
+
         Raises:
             ValueError: if the hand cannot be split
+            ValueError: if insufficient balance to place second bet
         '''
-        current_hand = self.hands[-1]
+        current_hand = self.hands[hand_index]
         if len(current_hand.cards) != 2 or current_hand.cards[0].rank != current_hand.cards[1].rank:
             raise ValueError(f"{bcolors.FAIL}[ERR] Cannot split: Hand must have exactly two cards of the same rank.{bcolors.ENDC}")
 
-        # Create two new hands from the split cards
+        # Check if player has enough balance to place the second bet
+        if self.current_bet > self.balance:
+            raise ValueError(f"{bcolors.FAIL}[ERR] Insufficient balance to split (need ${self.current_bet} for second hand).{bcolors.ENDC}")
+
+        # Deduct the additional bet for the second hand
+        self.balance -= self.current_bet
+
+        # Replace current hand with first card, insert second hand directly after
         card1, card2 = current_hand.cards
-        self.hands[-1] = Hand()
-        self.hands[-1].add_card(card1)
+        self.hands[hand_index] = Hand()
+        self.hands[hand_index].add_card(card1)
         new_hand = Hand()
         new_hand.add_card(card2)
-        self.hands.append(new_hand)
+        self.hands.insert(hand_index + 1, new_hand)
 
-    def double_down(self, card: Card):
+    def double_down(self, card: Card, hand: Hand = None):
         '''
         Double down and take one card
 
         Args:
             card (Card): card to be taken
+            hand (Hand): the specific hand to double on (defaults to last hand)
 
         Raises:
             ValueError: if the player has insufficient funds
             ValueError: if the player cannot double down after hit
         '''
+        if hand is None:
+            hand = self.hands[-1]
+
         if self.current_bet > self.balance:
             raise ValueError(f"{bcolors.FAIL}[ERR] Insufficient balance to double down.{bcolors.ENDC}")
-        if self.hands[0].num_cards() != 2: # FIX: split case
+        if hand.num_cards() != 2:
             raise ValueError(f"{bcolors.FAIL}[ERR] Cannot double down after a hit.{bcolors.ENDC}")
 
         self.balance -= self.current_bet
         self.current_bet *= 2
-        self.hit(card)
+        hand.add_card(card)
 
     def reset_for_new_round(self):
         '''
@@ -362,13 +377,13 @@ class Bot(Player):
         play a bots turn
 
         Args:
-            shoe (Shoe): the shoe of the game       
+            shoe (Shoe): the shoe of the game
             dealer_visible_card (str): dealer's visible card
         '''
         for hand in self.hands:
             print(f"\n{self.name}'s turn:\n\tCurrent Hand: {hand}")
             while not hand.is_blackjack() and not hand.is_busted():
-                action = self.make_decision(dealer_visible_card)
+                action = self.make_decision(dealer_visible_card, hand)
                 print(f"\t{self.name} chooses to {action}")
 
                 if action == "hit":
@@ -380,7 +395,7 @@ class Bot(Player):
                     break
                 elif action == "double":
                     # Ensure enough balance to double AND only on first action
-                    if (float(self.balance) >= float(self.current_bet)) and (self.hands[0].num_cards() == 2):  
+                    if (float(self.balance) >= float(self.current_bet)) and (hand.num_cards() == 2):
                         self.balance -= self.current_bet
                         self.current_bet *= 2
                         card = shoe.draw_card()
@@ -389,7 +404,7 @@ class Bot(Player):
                         print(f"\t{self.name} doubles: {hand}")
                         break  # Doubling ends the turn
                     else:
-                        if self.hands[0].num_cards() > 2:
+                        if hand.num_cards() > 2:
                             print(f"\t{bcolors.OKBLUE}[i] cannot double after hitting.{bcolors.ENDC}")
                         else:
                             print(f"\t{bcolors.OKBLUE}[i] cannot double due to insufficient balance.{bcolors.ENDC}")
@@ -401,19 +416,20 @@ class Bot(Player):
                 else:
                     print(f"{bcolors.FAIL} Invalid action: {action} {bcolors.ENDC}")
 
-    def make_decision(self, dealer_visible_card: str) -> str:
+    def make_decision(self, dealer_visible_card: str, hand: Hand) -> str:
         '''
         make a decision on the hand, based on strategy
 
         Args:
             dealer_visible_card (str): dealer's visible card
+            hand (Hand): the hand to make decision for
 
         Returns:
             str: decision on hand
         '''
         # decision table for by the books
-        # TODO: add soft table 
-        # TODO: add split table 
+        # TODO: add soft table
+        # TODO: add split table
         # dealer card: player hand
         DECISION_TABLE_BTB = {
             # player hard
@@ -481,17 +497,17 @@ class Bot(Player):
 
         #= default =#
         if self.strategy == "default":
-            hand_value = self.hands[0].calculate_value()
+            hand_value = hand.calculate_value()
 
             if hand_value <= 16:
                 return "hit"
             else:
                 return "stand"
-            
+
         #= by the book =#
         elif self.strategy == "by the books":
             dealer_value = get_card_value(dealer_visible_card)
-            hand_value = self.hands[0].calculate_value()
+            hand_value = hand.calculate_value()
 
             if dealer_value not in DECISION_TABLE_BTB or hand_value not in DECISION_TABLE_BTB[dealer_value]:
                 return "stand"  # Default action if no rule exists
@@ -502,7 +518,7 @@ class Bot(Player):
 
 class BlackjackGame:
     def __init__(self, num_decks: int, player_names: List[str], bot_info: List[dict], starting_balance: int, log_file: str,
-                 deal_delay: int):
+                 deal_delay: int, allow_double_after_split: bool = True, split_limit: int = 1, save_data: dict = None):
         '''
         init the game with a shoe, dealer, and players
         shuffles deck
@@ -514,29 +530,60 @@ class BlackjackGame:
             starting_balance (int): initial balance for each player
             log_file (str): path of the logfile
             deal_delay (int): time (in seconds) for a card to deal
+            allow_double_after_split (bool): whether doubling is allowed after splitting
+            split_limit (int): max number of splits allowed (-1 for unlimited, cannot be 0)
+            save_data (dict): optional save file data to restore game state
         '''
         self.num_decks = num_decks
         self.shoe = Shoe(num_decks)
         self.shoe.shuffle()
         self.dealer = Player("Dealer", balance=0)
-        self.players = [Player(name, starting_balance) for name in player_names]
         self.deal_delay = deal_delay
-        
+        self.allow_double_after_split = allow_double_after_split
+        self.split_limit = split_limit if split_limit != 0 else 1  # Cannot be 0, default to 1
+
+        # Resolve player balances from save or use starting_balance
+        saved_player_balances = {}
+        saved_bot_balances = {}
+        saved_bot_epsilons = {}
+        if save_data:
+            for p in save_data.get("players", []):
+                saved_player_balances[p["name"]] = p["balance"]
+            for b in save_data.get("bots", []):
+                saved_bot_balances[b["name"]] = b["balance"]
+                if "epsilon" in b:
+                    saved_bot_epsilons[b["name"]] = b["epsilon"]
+
+        self.players = [Player(name, saved_player_balances.get(name, starting_balance)) for name in player_names]
+
         # Initialize bots from settings
         self.bots = []
         for bot in bot_info:
+            bal = saved_bot_balances.get(bot['name'], starting_balance)
             if bot.get('strategy') == 'ai-nn':
-                self.bots.append(TrainableBot(bot['name'], starting_balance, 2, 3))
+                self.bots.append(TrainableBot(bot['name'], bal, 2, 3))
             else:
-                self.bots.append(Bot(bot['name'], starting_balance, bot['strategy']))
-        
+                self.bots.append(Bot(bot['name'], bal, bot['strategy']))
+
         self.log_file = log_file
         self.round_data = {}
-        self.game_num = 0
+        self.game_num = save_data["rounds_played"] if save_data else 0
+
+        # Restore or initialize balance history
+        if save_data and "balance_history" in save_data:
+            self.balance_history = save_data["balance_history"]
+        else:
+            self.balance_history = {p.name: [p.balance] for p in self.players}
+            for bot in self.bots:
+                self.balance_history[bot.name] = [bot.balance]
 
         # create models dir if it doesnt exist
         if not os.path.exists("models"):
             os.makedirs("models")
+
+        # create saves dir if it doesnt exist
+        if not os.path.exists("saves"):
+            os.makedirs("saves")
 
         # Load AI bot models if they exist
         for bot in self.bots:
@@ -544,9 +591,11 @@ class BlackjackGame:
                 try:
                     bot_name = bot.name.replace(" ", "_")
                     additional_data = load_model(bot.q_network, bot.optimizer, f"models/{bot_name}_model.pth")
-                    bot.epsilon = additional_data.get("epsilon", 1.0)  # Default to 1.0 if not found
+                    # Save file epsilon takes priority over model file epsilon
+                    bot.epsilon = saved_bot_epsilons.get(bot.name, additional_data.get("epsilon", 1.0))
                 except FileNotFoundError as e:
                     print(f"{bcolors.OKBLUE}[i] AI Save not found, creating new AI. {bcolors.ENDC}")
+                    bot.epsilon = saved_bot_epsilons.get(bot.name, 1.0)
 
     def setup_round(self) -> None:
         '''
@@ -609,7 +658,13 @@ class BlackjackGame:
         dealer_visible_card = str(self.dealer.hands[0].cards[1])
         print(f"\n{bcolors.BOLD}{player.name}{bcolors.ENDC}, Your Turn:")
 
-        for hand in player.hands:
+        # Use index-based iteration to handle splits correctly
+        hand_index = 0
+        while hand_index < len(player.hands):
+            hand = player.hands[hand_index]
+            if len(player.hands) > 1:
+                print(f"\n\t--- Hand {hand_index + 1} of {len(player.hands)} ---")
+
             while True:
                 print(f"\n\tCurrent hand: {hand}")
                 if hand.is_blackjack():
@@ -632,8 +687,6 @@ class BlackjackGame:
                     action = "split"
 
                 if action == "hit":
-                    # NOTE: split feature
-                    # hand.add_card(Card("2", "Hearts"))
                     hand.add_card(self.shoe.draw_card())
                     time.sleep(self.deal_delay)
                     player.log_action("hit", dealer_visible_card)
@@ -641,31 +694,41 @@ class BlackjackGame:
                     player.log_action("stand", dealer_visible_card)
                     break
                 elif action == "double":
-                    if len(player.hands) > 1:
-                        print("Cannot double down after splitting.")
+                    # Check if doubling after split is allowed
+                    if len(player.hands) > 1 and not self.allow_double_after_split:
+                        print(f"\t{bcolors.FAIL}Cannot double down after splitting (disabled in settings).{bcolors.ENDC}")
                     else:
                         try:
-                            player.double_down(self.shoe.draw_card())
+                            player.double_down(self.shoe.draw_card(), hand)
                             player.log_action("double", dealer_visible_card)
                         except ValueError as e:
                             print(f"\t{e}")
                             continue
                         break
                 elif action == "split":
-                    if len(player.hands) == 1:
+                    # Check if splitting is allowed based on split_limit
+                    # split_limit = -1 means unlimited, otherwise len(hands) must be <= split_limit
+                    can_split = (self.split_limit == -1) or (len(player.hands) <= self.split_limit)
+                    if can_split:
                         try:
-                            player.split()
-                            player.log_action("hit", dealer_visible_card)
+                            player.split(hand_index)
+                            player.log_action("split", dealer_visible_card)
                         except ValueError as e:
                             print(f"\t{e}")
                             continue
-                        for new_hand in player.hands:
-                            new_hand.add_card(self.shoe.draw_card())
-                        break
+                        # Deal one card to each of the two newly split hands only
+                        player.hands[hand_index].add_card(self.shoe.draw_card())
+                        time.sleep(self.deal_delay)
+                        player.hands[hand_index + 1].add_card(self.shoe.draw_card())
+                        time.sleep(self.deal_delay)
+                        hand = player.hands[hand_index]
+                        print(f"\n\t--- Hand {hand_index + 1} of {len(player.hands)} ---")
                     else:
-                        print("Cannot split more than once.")
+                        print(f"\t{bcolors.FAIL}Cannot split: split limit of {self.split_limit} reached.{bcolors.ENDC}")
                 else:
                     print("Invalid action. Try again.")
+
+            hand_index += 1
 
     def dealer_turn(self) -> None:
         '''
@@ -785,6 +848,10 @@ class BlackjackGame:
                 if isinstance(player, TrainableBot):
                     player.update_final_reward(player.result)
 
+        # Track balance history for save/graph
+        for player in self.players + self.bots:
+            self.balance_history[player.name].append(player.balance)
+
         global LOG_GAME
         if LOG_GAME: self.log_game()
 
@@ -887,8 +954,52 @@ class BlackjackGame:
                 bot_name = bot.name.replace(" ", "_")
                 save_model(bot.q_network, bot.optimizer, f"models/{bot_name}_model.pth", additional_data={"epsilon": bot.epsilon})
 
+        # Offer save prompt (not in train mode)
+        global TRAIN_MODE
+        if not TRAIN_MODE:
+            while True:
+                save_choice = input("Save game? (yes/no): ").lower()
+                if save_choice in ["yes", "no"]:
+                    break
+                print(f"{bcolors.FAIL}[ERR] Please enter 'yes' or 'no'.{bcolors.ENDC}")
+
+            if save_choice == "yes":
+                default_name = f"save_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}"
+                save_name = input(f"Save name (Enter for '{default_name}'): ").strip()
+                if not save_name:
+                    save_name = default_name
+                self.save_game(save_name)
+
         global SHOW_GRAPH
         if SHOW_GRAPH: parse_log_and_plot(self.log_file)
+
+    def save_game(self, save_name: str):
+        '''
+        saves game state into specified file name
+        '''
+        save_name = save_name.strip().replace(".json", "")
+        save_path = f"saves/{save_name}.json"
+
+        save_data = {
+            "saved_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "rounds_played": self.game_num,
+            "players": [{"name": p.name, "balance": p.balance} for p in self.players],
+            "bots": [],
+            "balance_history": self.balance_history
+        }
+
+        for bot in self.bots:
+            if isinstance(bot, TrainableBot):
+                bot_entry = {"name": bot.name, "strategy": "ai-nn", "balance": bot.balance, "epsilon": bot.epsilon}
+            else:
+                bot_entry = {"name": bot.name, "strategy": bot.strategy, "balance": bot.balance}
+            save_data["bots"].append(bot_entry)
+
+        with open(save_path, 'w') as f:
+            json.dump(save_data, f, indent=4)
+
+        print(f"{bcolors.OKGREEN}[✓] Game saved to {save_path}{bcolors.ENDC}")
+        print(f"Open this game again with `python3 play_blackjack.py --load {save_name}`")
 
     def parse_command(self, command: str):
         '''
@@ -905,6 +1016,8 @@ class BlackjackGame:
             print('\t/editbalance [player] [new balance]    Modify a players balance')
             print('\t/showbalance                           Display the players balance')
             print('\t/shuffle                               Shuffles and resets the deck')
+            print('\t/save [save file name]                 Saves the current state of the game')
+            print('\t/load [save file name]                 Loads a game save')
 
         elif command == 'exit':
             self.end_game()
@@ -968,6 +1081,17 @@ class BlackjackGame:
             elif parts[-1] == "off":
                 GOD_MODE = False
                 print(f"{bcolors.HEADER}[i] GOD MODE OFF{bcolors.ENDC}")
+
+        elif command.split()[0] == 'save':
+            parts = command.split(maxsplit=1)
+            if len(parts) > 1:
+                save_name = parts[1].strip()
+            else:
+                save_name = f"save_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}"
+            self.save_game(save_name)
+
+        elif command.split()[0] == 'load':
+            print(f"{bcolors.OKBLUE}[i] To load a save, start the game with: python3 play_blackjack.py --load <save name>{bcolors.ENDC}")
 
         else:
             print(f"{bcolors.FAIL}[ERR] Invalid command -- run /help for list of commands.{bcolors.ENDC}")
@@ -1248,6 +1372,7 @@ def main():
     # argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--train", action='store_true', help="Train AI mode -- no player interaction")
+    parser.add_argument("--load", type=str, default=None, help="Load a saved game by save name")
     args = parser.parse_args()
 
     # import settings
@@ -1256,31 +1381,47 @@ def main():
 
     # extract show output
     global SHOW_OUTPUT, LOG_GAME, SHOW_GRAPH, DEFAULT_BET, TRAIN_MODE
-    SHOW_OUTPUT = settings["show_output"].lower() == "true"
-    LOG_GAME = settings["log_game"].lower() == "true"
-    SHOW_GRAPH = settings["show_graph"].lower() == "true"
+    SHOW_OUTPUT = bool(settings["show_output"])
+    LOG_GAME = bool(settings["log_game"])
+    SHOW_GRAPH = bool(settings["show_graph"])
     DEFAULT_BET = settings["default_bet"]
     TRAIN_MODE = args.train
+
+    # load save file if --load provided
+    save_data = None
+    if args.load:
+        save_name = args.load.replace(".json", "")
+        save_path = f"saves/{save_name}.json"
+        try:
+            with open(save_path, 'r') as f:
+                save_data = json.load(f)
+            print(f"{bcolors.OKGREEN}[✓] Loaded save: {save_name}{bcolors.ENDC}")
+        except FileNotFoundError:
+            print(f"{bcolors.FAIL}[ERR] Save file '{save_path}' not found.{bcolors.ENDC}")
+            quit()
 
     # get players
     players = []
     i = 1
 
-    while True:
-        # if in train mode, skip
-        if TRAIN_MODE:
-            break
-
-        player_i = input(f"Input player {i}'s name ('done' to continue): ")
-
-        if player_i != "done":
-            players.append(player_i)
-            i += 1
-        else:
-            if players != []:
+    if save_data:
+        players = [p["name"] for p in save_data["players"]]
+    else:
+        while True:
+            # if in train mode, skip
+            if TRAIN_MODE:
                 break
-            
-            print(f"{bcolors.FAIL}[ERR] Must be at least one player{bcolors.ENDC}")
+
+            player_i = input(f"Input player {i}'s name ('done' to continue): ")
+
+            if player_i != "done":
+                players.append(player_i)
+                i += 1
+            else:
+                if players != []:
+                    break
+
+                print(f"{bcolors.FAIL}[ERR] Must be at least one player{bcolors.ENDC}")
 
     # set up log file -- make folder if it doesnt exist
     if LOG_GAME:
@@ -1294,12 +1435,15 @@ def main():
 
     # initiate game
     bj_game = BlackjackGame(
-        num_decks = settings['num_decks'], 
+        num_decks = settings['num_decks'],
         player_names = players,
         bot_info = settings['bots'],
         starting_balance = settings['init_balance'],
         log_file = log_file,
-        deal_delay = settings['deal_delay']
+        deal_delay = settings['deal_delay'],
+        allow_double_after_split = settings.get('allow_double_after_split', True),
+        split_limit = settings.get('split_limit', 1),
+        save_data = save_data
     )
 
     # play game
