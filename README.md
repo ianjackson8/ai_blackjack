@@ -26,7 +26,9 @@ python3 play_blackjack.py --train
   - `strategy` : \<str\> playing strategy (options below)
     - "default" - hits on anything below 17, stands otherwise
     - "by the books" - plays based on best odds table
-    - "ai" - trainable reinforcement learning bot using Q-learning
+    - "ai-nn" - trainable reinforcement learning bot using Q-learning
+
+> **Note:** `show_graph` requires `log_game: true`. If `log_game` is false, the graph will be skipped with a warning at startup.
 
 ## Save & Load
 Save a game to resume later:
@@ -60,6 +62,14 @@ The AI bot uses reinforcement learning (Q-learning) to learn optimal blackjack s
 - **Model Persistence**: Saves/loads from `bot_model.pth` to continue learning across sessions
 
 # Changelog
+- v4.0
+  - fix crash when closing `/graph` window mid-game (non-blocking `plt.show`)
+  - fix `show_graph: true` silently failing when `log_game: false` — now warns at startup
+  - fix `IndexError` in train mode when no bots are configured
+  - fix GOD_MODE dealing hand twice and not drawing cards from shoe
+  - fix split hands not being logged (all hands now recorded per round)
+  - fix double-down on split hand corrupting payout for other hands (per-hand bet tracking)
+  - update log format: `hands` (list) and `results` (list) replace single `final_hand`/`result` fields
 - v3.0
   - fix split feature
   - add game settings related to splitting mechanics
