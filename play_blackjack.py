@@ -11,13 +11,13 @@ import random
 import os
 import json
 import argparse
-import torch 
+import torch                    # type: ignore 
 import time
 
 import numpy as np
 import torch.nn as nn           # type: ignore 
 import torch.optim as optim     # type: ignore 
-import matplotlib.pyplot as plt 
+import matplotlib.pyplot as plt # type: ignore 
 
 from typing import List, Union
 from datetime import datetime
@@ -620,12 +620,11 @@ class BlackjackGame:
         for player in self.players + self.bots:
             # Only deal cards to players who bet
             if player.current_bet > 0:  
-                for _ in range(2):
-                    if GOD_MODE and not (isinstance(player, Bot) or isinstance(player, TrainableBot)):
-                        player.hands = [Hand([Card("Ace", "Hearts"), Card("King", "Hearts")])]
-                        continue
-
-                    player.hit(self.shoe.draw_card())
+                if GOD_MODE and not (isinstance(player, Bot) or isinstance(player, TrainableBot)):
+                    player.hands = [Hand([Card("Ace", "Hearts"), Card("King", "Hearts")])]
+                else:
+                    for _ in range(2):
+                        player.hit(self.shoe.draw_card())
         for _ in range(2):
             self.dealer.hit(self.shoe.draw_card())
 
@@ -870,7 +869,7 @@ class BlackjackGame:
             # training end condition 
             global DEFAULT_BET
             global TRAIN_MODE
-            if (self.bots[0].balance <= DEFAULT_BET) and TRAIN_MODE:
+            if TRAIN_MODE and (not self.bots or self.bots[0].balance <= DEFAULT_BET):
                 ai_done = True
             else:
                 self.play_round()
@@ -1386,6 +1385,10 @@ def main():
     SHOW_GRAPH = bool(settings["show_graph"])
     DEFAULT_BET = settings["default_bet"]
     TRAIN_MODE = args.train
+
+    if TRAIN_MODE and not settings.get('bots'):
+        print(f"{bcolors.FAIL}[ERR] Train mode requires at least one bot configured in game_settings.json.{bcolors.ENDC}")
+        quit()
 
     # load save file if --load provided
     save_data = None
