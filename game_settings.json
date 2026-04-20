@@ -8,6 +8,7 @@
     "deal_delay": 1.5,
     "allow_double_after_split": true,
     "split_limit": -1,
+    "allow_insurance": true,
     "bots" : [
         {
             "name": "BTB Bot",

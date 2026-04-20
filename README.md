@@ -21,6 +21,7 @@ python3 play_blackjack.py --train
 - `deal_delay` : \<float\> time to deal cards (set to 0 for no delay)
 - `allow_double_after_split`: \<bool\> allows the player to double on a split (true/false)
 - `split_limit`: \<int\> The amount of splits allowed for a player (set to -1 for no limit)
+- `allow_insurance`: \<bool\> offer insurance side-bet to human players when dealer shows Ace (true/false)
 - `bots` : \<List[dict]> information of bots to play alongside player
   - `name` : \<str\> name of the bot
   - `strategy` : \<str\> playing strategy (options below)
@@ -46,6 +47,7 @@ Player balances, bot balances, AI training state (epsilon), and balance history 
 ## Commands
 - `/help` - display available commands
 - `/exit` - quit the game
+- `/stats` - show win/loss/push/bust counts, net P&L, and win rate for all players
 - `/graph` - display player balance graph
 - `/editbalance [player] [new balance]` - set a players balance
 - `/showbalance` - shows the current balance of all players
@@ -63,6 +65,9 @@ The AI bot uses reinforcement learning (Q-learning) to learn optimal blackjack s
 
 # Changelog
 - v4.0
+  - add insurance side-bet — offered to human players when dealer shows Ace; pays 2:1; toggleable via `allow_insurance` in settings
+  - add `/stats` command — shows W/L/Push/BJ counts, net P&L, win rate, and best/worst round for all players; also printed automatically at end of session
+  - refactor terminal UI to match slot machine style: `C` color class, box-draw headers, 2-space indented output, `[N]` menu prompts
   - fix crash when closing `/graph` window mid-game (non-blocking `plt.show`)
   - fix `show_graph: true` silently failing when `log_game: false` — now warns at startup
   - fix `IndexError` in train mode when no bots are configured
