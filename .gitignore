@@ -20,6 +20,7 @@ saves/*
 
 # claude
 CLAUDE.md
+.claude/*
 
 # tests 
 tests/*
