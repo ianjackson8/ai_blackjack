@@ -3,13 +3,13 @@
     "init_balance": 500,
     "default_bet": 10,
     "show_output": true,
-    "log_game": true,
+    "log_game": false,
     "show_graph": true,
     "deal_delay": 1.5,
     "allow_double_after_split": true,
     "split_limit": -1,
     "allow_insurance": true,
-    "bots" : [
+    "bots": [
         {
             "name": "BTB Bot",
             "strategy": "by the books"
@@ -17,9 +17,16 @@
         {
             "name": "NN Bot",
             "strategy": "ai-nn"
+        },
+        {
+            "name": "Count Bot",
+            "strategy": "counter"
         }
     ],
-    "train_param" : {
-        "epochs" : 100
+    "train_param": {
+        "rounds": 60000
+    },
+    "counter": {
+        "max_spread": 8
     }
 }

@@ -3,23 +3,30 @@
 Play blackjack in terminal
 
 Author: Ian Jackson
-Version v4.0
+Version v5.0
 '''
 
 import random
 import os
+import sys
 import json
 import argparse
 import torch
-import time
 
 import numpy as np
 import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
 
+from collections import deque
+from itertools import count as _counter
 from typing import List, Optional, Union
 from datetime import datetime
+
+from counter import BASE_EDGE, bet_units, load_counter, make_tracker, save_counter, train_counter, evaluate_counter
+from strategy import basic_strategy
+from tui import (HeadlessUI, RichUI, card_markup, edit_settings, esc, hand_label, hand_total, key_value_table, money,
+                 signed_money, stats_table)
 
 #== Global Variables ==#
 SHOW_OUTPUT = True
@@ -29,22 +36,40 @@ DEFAULT_BET = 10
 TRAIN_MODE = False
 GOD_MODE = False
 
-#== Colors ==#
-class C:
-    RESET     = '\033[0m'
-    BOLD      = '\033[1m'
-    DIM       = '\033[2m'
-    UNDERLINE = '\033[4m'
-    RED       = '\033[91m'
-    GREEN     = '\033[92m'
-    YELLOW    = '\033[93m'
-    BLUE      = '\033[94m'
-    MAGENTA   = '\033[95m'
-    CYAN      = '\033[96m'
-    WHITE     = '\033[97m'
+NULL_UI = HeadlessUI(verbose=False)
 
-def clear() -> None:
-    os.system('cls' if os.name == 'nt' else 'clear')
+SETTINGS_FILE = 'game_settings.json'
+BOT_STRATEGIES = ["by the books", "default", "ai-nn", "counter", "counter-hilo"]
+
+# Fields shown in the in-game settings editor (bots are edited separately)
+SETTINGS_FIELDS = [
+    {"key": "num_decks", "label": "Decks in shoe", "kind": "int", "min": 1, "desc": "Number of 52-card decks"},
+    {"key": "init_balance", "label": "Starting balance", "kind": "money", "min": 1, "desc": "New players and bots start with this"},
+    {"key": "default_bet", "label": "Default bet", "kind": "money", "min": 1, "desc": "Bots always bet this; your first suggested bet"},
+    {"key": "deal_delay", "label": "Deal delay", "kind": "seconds", "min": 0, "desc": "Pause between cards (0 = instant)"},
+    {"key": "allow_insurance", "label": "Insurance", "kind": "bool", "desc": "Offer insurance when the dealer shows an Ace"},
+    {"key": "allow_double_after_split", "label": "Double after split", "kind": "bool", "desc": "Allow doubling down on split hands"},
+    {"key": "split_limit", "label": "Split limit", "kind": "split_limit", "min": -1, "desc": "Max splits per hand (-1 = unlimited)"},
+    {"key": "log_game", "label": "Log games", "kind": "bool", "desc": "Write every hand to logs/"},
+    {"key": "show_graph", "label": "Balance graph", "kind": "bool", "desc": "Plot balances on exit (needs Log games)"},
+    {"key": "show_output", "label": "Show table in --train", "kind": "bool", "desc": "Off = fast one-line progress"},
+    {"key": "counter.max_spread", "label": "Counter bet spread", "kind": "int", "min": 1, "default": 8,
+     "desc": "Most a counter bot bets, in units of default bet"},
+    {"key": "train_param.rounds", "label": "Training rounds", "kind": "int", "min": 1, "default": 60000,
+     "desc": "How many rounds --train plays"},
+]
+
+COMMANDS = [
+    ("/help", "Show this message"),
+    ("/exit", "Quit the game"),
+    ("/stats", "Show win/loss statistics"),
+    ("/graph", "Show balance graph"),
+    ("/editbalance [player] [balance]", "Edit a player's balance"),
+    ("/showbalance", "Show all balances"),
+    ("/shuffle", "Reshuffle the deck"),
+    ("/save [name]", "Save the game"),
+    ("/load [name]", "Info on loading a save"),
+]
 
 #== Classes ==#
 
@@ -66,10 +91,18 @@ class Card:
         return f"{self.rank} of {self.suit}"
 
 
+HILO = {"2": 1, "3": 1, "4": 1, "5": 1, "6": 1, "10": -1, "Jack": -1, "Queen": -1, "King": -1, "Ace": -1}
+
+
+_SHOE_IDS = _counter(1)
+
+
 class Shoe:
     def __init__(self, num_decks: int = 1):
         self.num_decks = num_decks
+        self.shuffle_id = next(_SHOE_IDS)   # changes on every fresh shoe, so counters know to reset
         self.cards = self._generate_shoe()
+        self.running_count = 0   # Hi-Lo count of every card drawn since the shuffle
         self.shuffle()
 
     def _generate_shoe(self) -> List[Card]:
@@ -87,8 +120,22 @@ class Shoe:
 
     def draw_card(self) -> Card:
         if not self.cards:
-            raise ValueError("The shoe is empty, cannot draw card")
-        return self.cards.pop()
+            # ran dry mid-round (small shoe, lots of splits/hits): refill rather than crash
+            self.cards = self._generate_shoe()
+            self.running_count = 0
+            self.shuffle_id = next(_SHOE_IDS)
+            self.shuffle()
+        card = self.cards.pop()
+        self.running_count += HILO.get(card.rank, 0)
+        return card
+
+    def true_count(self) -> float:
+        '''Running count per remaining deck — positive means the shoe is rich in tens and aces.'''
+        return self.running_count / max(len(self.cards) / 52, 0.5)
+
+    def penetration(self) -> float:
+        '''Fraction of the shoe dealt so far.'''
+        return 1 - len(self.cards) / (self.num_decks * 52)
 
     def __len__(self) -> int:
         return len(self.cards)
@@ -135,6 +182,9 @@ class Player:
         self.hand_bets = []
         self.actions = []
         self.results = []
+        self.insurance_bet = 0
+        self.last_bet = 0
+        self.round_start_balance = balance
         self.stats = {"win": 0, "lose": 0, "push": 0, "bust": 0, "blackjack": 0}
 
     def log_action(self, action: str, dealer_visible_card: str):
@@ -147,9 +197,9 @@ class Player:
 
     def place_bet(self, amount: int) -> None:
         if amount <= 0:
-            raise ValueError(f"  {C.RED}Bet amount must be greater than zero.{C.RESET}")
+            raise ValueError("Bet amount must be greater than zero.")
         if amount > self.balance:
-            raise ValueError(f"  {C.RED}Bet amount exceeds available balance.{C.RESET}")
+            raise ValueError("Bet amount exceeds available balance.")
         self.current_bet = amount
         self.hand_bets = [amount]
         self.balance -= amount
@@ -163,9 +213,9 @@ class Player:
     def split(self, hand_index: int = 0) -> None:
         current_hand = self.hands[hand_index]
         if len(current_hand.cards) != 2 or current_hand.cards[0].rank != current_hand.cards[1].rank:
-            raise ValueError(f"  {C.RED}Cannot split: hand must have exactly two cards of the same rank.{C.RESET}")
+            raise ValueError("Cannot split: hand must have exactly two cards of the same rank.")
         if self.current_bet > self.balance:
-            raise ValueError(f"  {C.RED}Insufficient balance to split (need ${self.current_bet} for second hand).{C.RESET}")
+            raise ValueError(f"Insufficient balance to split (need ${self.current_bet} for second hand).")
         self.balance -= self.current_bet
         card1, card2 = current_hand.cards
         self.hands[hand_index] = Hand()
@@ -179,17 +229,18 @@ class Player:
         if hand is None:
             hand = self.hands[-1]
         if hand.num_cards() != 2:
-            raise ValueError(f"  {C.RED}Cannot double down after a hit.{C.RESET}")
+            raise ValueError("Cannot double down after a hit.")
         if hand_index is None:
             hand_index = len(self.hands) - 1
         bet = self.hand_bets[hand_index] if self.hand_bets else self.current_bet
         if bet > self.balance:
-            raise ValueError(f"  {C.RED}Insufficient balance to double down.{C.RESET}")
+            raise ValueError("Insufficient balance to double down.")
         self.balance -= bet
         self.hand_bets[hand_index] = bet * 2
         hand.add_card(card)
 
     def reset_for_new_round(self):
+        self.round_start_balance = self.balance
         self.hands = [Hand()]
         self.current_bet = 0
         self.hand_bets = []
@@ -207,20 +258,23 @@ class Bot(Player):
         super().__init__(name, balance)
         self.strategy = strategy
 
-    def play_turn(self, shoe: Shoe, dealer_visible_card: str, deal_delay: int):
-        for hand in self.hands:
-            print(f"\n  {C.BOLD}{self.name}{C.RESET}'s turn:")
-            print(f"  Hand: {hand}")
+    def play_turn(self, shoe: Shoe, dealer_visible_card: str, deal_delay: int, ui=None):
+        ui = ui or NULL_UI
+        name = f"[cyan]{esc(self.name)}[/]"
+        for i, hand in enumerate(self.hands):
+            ui.set_active(self, i)
+            ui.pause(deal_delay / 2)
             while not hand.is_blackjack() and not hand.is_busted():
                 action = self.make_decision(dealer_visible_card, hand)
-                print(f"  {C.DIM}{self.name} → {action}{C.RESET}")
 
                 if action == "hit":
                     card = shoe.draw_card()
                     hand.add_card(card)
-                    time.sleep(deal_delay)
-                    print(f"  {self.name} hits: {hand}")
+                    ui.log(f"{name} hits → {card_markup(card)}  ({hand_label(hand)})")
+                    ui.pause(deal_delay)
                 elif action == "stand":
+                    ui.log(f"{name} stands on {hand_label(hand)}")
+                    ui.pause(deal_delay / 2)
                     break
                 elif action == "double":
                     if (float(self.balance) >= float(self.current_bet)) and (hand.num_cards() == 2):
@@ -229,20 +283,20 @@ class Bot(Player):
                         self.hand_bets[0] = bet * 2
                         card = shoe.draw_card()
                         hand.add_card(card)
-                        time.sleep(deal_delay)
-                        print(f"  {self.name} doubles: {hand}")
+                        ui.log(f"{name} [gold1]doubles[/] → {card_markup(card)}  ({hand_label(hand)})")
+                        ui.pause(deal_delay)
                         break
                     else:
-                        if hand.num_cards() > 2:
-                            print(f"  {C.CYAN}Cannot double after hitting.{C.RESET}")
-                        else:
-                            print(f"  {C.CYAN}Cannot double — insufficient balance.{C.RESET}")
                         card = shoe.draw_card()
                         hand.add_card(card)
-                        time.sleep(deal_delay)
-                        print(f"  {self.name} hits: {hand}")
+                        reason = "after hitting" if hand.num_cards() > 3 else "— low balance"
+                        ui.log(f"{name} can't double {reason}, hits → {card_markup(card)}  ({hand_label(hand)})")
+                        ui.pause(deal_delay)
                 else:
-                    print(f"  {C.RED}Invalid action: {action}{C.RESET}")
+                    ui.log(f"[red]{name}: invalid action {esc(action)}[/]")
+                    break
+            if hand.is_busted():
+                ui.log(f"{name} [red]busts[/] with {hand.calculate_value()}")
 
     def make_decision(self, dealer_visible_card: str, hand: Hand) -> str:
         DECISION_TABLE_BTB = {
@@ -320,13 +374,114 @@ class Bot(Player):
             return DECISION_TABLE_BTB[dealer_value][hand_value]
 
         else:
-            raise ValueError(f"  {C.RED}Invalid bot strategy: {self.strategy}.{C.RESET}")
+            raise ValueError(f"Invalid bot strategy: {self.strategy}.")
+
+
+COUNTER_MODEL_PATH = "models/card_counter_lstm.pth"
+# strategy name -> how the bot tracks the shoe ("counter" is the LSTM; the others are for comparison)
+COUNTER_TRACKERS = {"counter": "lstm", "counter-hilo": "hi-lo", "counter-perfect": "perfect", "counter-flat": "flat"}
+
+
+class CounterBot(Bot):
+    '''
+    Plays perfect basic strategy (including splits) and sizes bets from a card-count tracker.
+    With strategy "counter" the tracker is the LSTM in counter.py; it watches every card that
+    becomes visible and its predicted shoe composition is turned into an edge estimate.
+    '''
+
+    def __init__(self, name: str, balance: int, strategy: str = "counter", num_decks: int = 6,
+                 model=None, das: bool = True, split_limit: int = -1, max_spread: int = 8):
+        super().__init__(name, balance, strategy)
+        kind = COUNTER_TRACKERS.get(strategy, "lstm")
+        self.missing_model = kind == "lstm" and model is None
+        if self.missing_model:
+            kind = "flat"
+        self.tracker_kind = kind
+        self.tracker = make_tracker(kind, num_decks, model)
+        self.das = das
+        self.split_limit = split_limit
+        self.max_spread = max_spread
+        self.last_edge = BASE_EDGE
+        self._shoe_id = None
+
+    def _sync(self, shoe: Shoe) -> None:
+        if shoe.shuffle_id != self._shoe_id:
+            self.tracker.reset(shoe.num_decks)
+            self._shoe_id = shoe.shuffle_id
+
+    def choose_bet(self, shoe: Shoe, base_bet) -> float:
+        self._sync(shoe)
+        self.last_edge = self.tracker.edge()
+        units = 1 if self.tracker_kind == "flat" else bet_units(self.last_edge, self.max_spread)
+        return min(units * base_bet, self.balance)
+
+    def observe(self, ranks: List[str], shoe: Shoe) -> None:
+        '''Called after each round with every card that was shown.'''
+        self._sync(shoe)
+        self.tracker.observe(ranks)
+
+    def count_summary(self) -> str:
+        '''Short markup line for the seat panel.'''
+        if self.tracker_kind == "flat":
+            return "[grey50]no model — run --train-counter[/]" if self.missing_model else "[grey50]flat betting[/]"
+        return f"TC {self.tracker.true_count():+.1f} · edge {self.tracker.edge() * 100:+.1f}%"
+
+    def bet_note(self) -> str:
+        '''Extra detail for the log when the bot raises its bet.'''
+        note = f"edge {self.last_edge * 100:+.2f}%"
+        if self.tracker_kind == "lstm":
+            note += f" · LSTM count {self.tracker.true_count():+.1f} / real {self.tracker.exact_true_count():+.1f}"
+        return note
+
+    def play_turn(self, shoe: Shoe, dealer_visible_card: str, deal_delay: int, ui=None):
+        ui = ui or NULL_UI
+        name = f"[cyan]{esc(self.name)}[/]"
+        up = dealer_visible_card.split(" ")[0]
+        i = 0
+        while i < len(self.hands):
+            hand = self.hands[i]
+            ui.set_active(self, i)
+            ui.pause(deal_delay / 2)
+            while not hand.is_busted() and hand.calculate_value() < 21:
+                stake = self.hand_bets[i] if i < len(self.hand_bets) else self.current_bet
+                two = hand.num_cards() == 2
+                can_double = two and self.balance >= stake and (len(self.hands) == 1 or self.das)
+                can_split = (two and hand.cards[0].rank == hand.cards[1].rank and self.balance >= self.current_bet
+                             and (self.split_limit == -1 or len(self.hands) <= self.split_limit))
+                action = basic_strategy([c.rank for c in hand.cards], up, can_double, can_split, self.das)
+
+                if action == "split":
+                    rank = hand.cards[0].rank
+                    self.split(i)
+                    ui.log(f"{name} [gold1]splits[/] a pair of {esc(rank)}s")
+                    for j in (i, i + 1):
+                        self.hands[j].add_card(shoe.draw_card())
+                        ui.pause(deal_delay)
+                    hand = self.hands[i]
+                elif action == "hit":
+                    card = shoe.draw_card()
+                    hand.add_card(card)
+                    ui.log(f"{name} hits → {card_markup(card)}  ({hand_label(hand)})")
+                    ui.pause(deal_delay)
+                elif action == "double":
+                    self.double_down(shoe.draw_card(), hand, i)
+                    ui.log(f"{name} [gold1]doubles[/] → {card_markup(hand.cards[-1])}  ({hand_label(hand)})")
+                    ui.pause(deal_delay)
+                    break
+                else:
+                    ui.log(f"{name} stands on {hand_label(hand)}")
+                    ui.pause(deal_delay / 2)
+                    break
+            if hand.is_busted():
+                ui.log(f"{name} [red]busts[/] with {hand.calculate_value()}")
+            i += 1
 
 
 class BlackjackGame:
     def __init__(self, num_decks: int, player_names: List[str], bot_info: List[dict], starting_balance: int, log_file: str,
                  deal_delay: int, allow_double_after_split: bool = True, split_limit: int = 1,
-                 allow_insurance: bool = True, save_data: dict = None):
+                 allow_insurance: bool = True, save_data: dict = None, ui=None, counter_max_spread: int = 8):
+        self.ui = ui or NULL_UI
         self.num_decks = num_decks
         self.shoe = Shoe(num_decks)
         self.shoe.shuffle()
@@ -335,6 +490,7 @@ class BlackjackGame:
         self.allow_double_after_split = allow_double_after_split
         self.split_limit = split_limit if split_limit != 0 else 1
         self.allow_insurance = allow_insurance
+        self.phase = "betting"
 
         saved_player_balances = {}
         saved_bot_balances = {}
@@ -349,15 +505,31 @@ class BlackjackGame:
 
         self.players = [Player(name, saved_player_balances.get(name, starting_balance)) for name in player_names]
 
+        self.counter_model = None
+        if any(b.get('strategy') == 'counter' for b in bot_info):
+            try:
+                self.counter_model = load_counter(COUNTER_MODEL_PATH)
+                self.ui.log(f"[grey50]Card-counter LSTM loaded from {COUNTER_MODEL_PATH}[/]")
+            except (FileNotFoundError, ValueError):
+                self.ui.log("[yellow]No card-counter model yet — counter bots bet flat. "
+                            "Train one with: python3 play_blackjack.py --train-counter[/]")
+
         self.bots = []
         for bot in bot_info:
             bal = saved_bot_balances.get(bot['name'], starting_balance)
             if bot.get('strategy') == 'ai-nn':
-                self.bots.append(TrainableBot(bot['name'], bal, 2, 3))
+                self.bots.append(TrainableBot(bot['name'], bal))
+            elif bot.get('strategy', '') in COUNTER_TRACKERS:
+                self.bots.append(CounterBot(bot['name'], bal, bot['strategy'], num_decks=num_decks,
+                                            model=self.counter_model, das=allow_double_after_split,
+                                            split_limit=self.split_limit, max_spread=counter_max_spread))
             else:
                 self.bots.append(Bot(bot['name'], bal, bot['strategy']))
 
         self.log_file = log_file
+        self.log_entries = []
+        self.starting_balance = starting_balance
+        self.train_until = None
         self.round_data = {}
         self.game_num = save_data["rounds_played"] if save_data else 0
 
@@ -377,99 +549,111 @@ class BlackjackGame:
             if isinstance(bot, TrainableBot):
                 try:
                     bot_name = bot.name.replace(" ", "_")
-                    additional_data = load_model(bot.q_network, bot.optimizer, f"models/{bot_name}_model.pth")
+                    additional_data = bot.load(f"models/{bot_name}_model.pth", log=self.ui.log)
                     bot.epsilon = saved_bot_epsilons.get(bot.name, additional_data.get("epsilon", 1.0))
                 except FileNotFoundError:
-                    print(f"  {C.CYAN}AI save not found — creating new model.{C.RESET}")
+                    self.ui.log(f"[cyan]No saved model for {esc(bot.name)} — starting fresh.[/]")
                     bot.epsilon = saved_bot_epsilons.get(bot.name, 1.0)
+                except ValueError:
+                    self.ui.log(f"[yellow]{esc(bot.name)}'s saved model is an older version — starting fresh "
+                                f"(it will be overwritten on exit).[/]")
+                    bot.epsilon = 1.0
+
+    @property
+    def seats(self) -> List[Player]:
+        return self.players + self.bots
 
     def setup_round(self) -> None:
-        for player in self.players + self.bots:
+        for player in self.seats:
             player.reset_for_new_round()
         self.dealer.reset_for_new_round()
         self.round_data = {}
         self.game_num += 1
+        self.phase = "betting"
 
     def deal_cards(self) -> None:
         global GOD_MODE
-        for player in self.players + self.bots:
-            if player.current_bet > 0:
-                if GOD_MODE and not (isinstance(player, Bot) or isinstance(player, TrainableBot)):
-                    player.hands = [Hand([Card("Ace", "Hearts"), Card("King", "Hearts")])]
-                else:
-                    for _ in range(2):
-                        player.hit(self.shoe.draw_card())
+        self.phase = "playing"
+        in_play = [p for p in self.seats if p.current_bet > 0]
+        delay = min(self.deal_delay, 0.25)
+        for player in in_play:
+            if GOD_MODE and not isinstance(player, (Bot, TrainableBot)):
+                player.hands = [Hand([Card("Ace", "Hearts"), Card("King", "Hearts")])]
+        # deal like a real table: one card each, round twice, dealer last
         for _ in range(2):
+            for player in in_play:
+                if GOD_MODE and not isinstance(player, (Bot, TrainableBot)):
+                    continue
+                player.hit(self.shoe.draw_card())
+                self.ui.pause(delay)
             self.dealer.hit(self.shoe.draw_card())
+            self.ui.pause(delay)
 
     def display_table(self) -> None:
-        clear()
-        print()
-        print(f'  {C.BOLD}{C.YELLOW}╔══════════════════════════════════════╗{C.RESET}')
-        print(f'  {C.BOLD}{C.YELLOW}║          ♠  B L A C K J A C K  ♠    ║{C.RESET}')
-        print(f'  {C.BOLD}{C.YELLOW}╚══════════════════════════════════════╝{C.RESET}')
-        print()
-        print(f'  {C.BOLD}Dealer:{C.RESET}  [Hidden] | {self.dealer.hands[0].cards[1]}')
-        print()
-        for player in self.players + self.bots:
-            if player.current_bet > 0:
-                print(f'  {C.BOLD}{player.name}{C.RESET}  {C.DIM}(${player.balance}){C.RESET}  {player.hands[0]}')
-        print()
+        self.ui.set_active(None)
 
-    def display_players(self) -> None:
-        print(f'  {C.BOLD}Players at the table:{C.RESET}')
-        for player in self.players + self.bots:
-            print(f'    {player.name}: {C.GREEN}${player.balance}{C.RESET}')
-        print()
+    def _action_options(self, player: Player, hand: Hand, hand_index: int) -> list:
+        options = [("h1", "hit", "Hit"), ("s2", "stand", "Stand")]
+        bet = player.hand_bets[hand_index] if hand_index < len(player.hand_bets) else player.current_bet
+        two_cards = hand.num_cards() == 2
+        if two_cards and bet <= player.balance and (len(player.hands) == 1 or self.allow_double_after_split):
+            options.append(("d3", "double", "Double"))
+        can_split = (self.split_limit == -1) or (len(player.hands) <= self.split_limit)
+        if two_cards and hand.cards[0].rank == hand.cards[1].rank and player.current_bet <= player.balance and can_split:
+            options.append(("p4", "split", "Split"))
+        return options
 
     def player_turn(self, player: Player) -> None:
         dealer_visible_card = str(self.dealer.hands[0].cards[1])
-        print(f"\n  {C.BOLD}{player.name}{C.RESET}, your turn:")
+        name = f"[green3]{esc(player.name)}[/]"
 
         hand_index = 0
         while hand_index < len(player.hands):
             hand = player.hands[hand_index]
-            if len(player.hands) > 1:
-                print(f"\n  {C.DIM}── Hand {hand_index + 1} of {len(player.hands)} ──{C.RESET}")
 
             while True:
-                print(f"\n  Hand: {hand}")
+                self.ui.set_active(player, hand_index)
                 if hand.is_blackjack():
-                    print(f"  {C.BOLD}{C.GREEN}Blackjack!{C.RESET}")
+                    self.ui.log(f"{name} has [bold gold1]Blackjack![/]")
+                    self.ui.pause(self.deal_delay / 2)
                     break
                 elif hand.is_busted():
-                    print(f"  {C.BOLD}{C.RED}Busted!{C.RESET}")
+                    self.ui.log(f"{name} [red]busts[/] with {hand.calculate_value()}")
+                    self.ui.pause(self.deal_delay / 2)
+                    break
+                elif hand.calculate_value() == 21:
+                    self.ui.log(f"{name} stands on 21")
+                    player.log_action("stand", dealer_visible_card)
                     break
 
-                print(f"  {C.DIM}[1] Hit  [2] Stand  [3] Double  [4] Split{C.RESET}")
-                action = input("  > ").strip().lower()
-
-                if action == "1":
-                    action = "hit"
-                elif action == "2":
-                    action = "stand"
-                elif action == "3":
-                    action = "double"
-                elif action == "4":
-                    action = "split"
+                where = f" · hand {hand_index + 1}/{len(player.hands)}" if len(player.hands) > 1 else ""
+                prompt = f"[bold]{esc(player.name)}[/]{where} — [bold]{hand_label(hand)}[/] vs dealer {card_markup(self.dealer.hands[0].cards[1])}"
+                action = self.ui.choose(prompt, self._action_options(player, hand, hand_index))
 
                 if action == "hit":
-                    hand.add_card(self.shoe.draw_card())
-                    time.sleep(self.deal_delay)
+                    card = self.shoe.draw_card()
+                    hand.add_card(card)
+                    self.ui.log(f"{name} hits → {card_markup(card)}  ({hand_label(hand)})")
+                    self.ui.pause(self.deal_delay)
                     player.log_action("hit", dealer_visible_card)
                 elif action == "stand":
+                    self.ui.log(f"{name} stands on {hand_label(hand)}")
                     player.log_action("stand", dealer_visible_card)
                     break
                 elif action == "double":
                     if len(player.hands) > 1 and not self.allow_double_after_split:
-                        print(f"  {C.RED}Cannot double down after splitting (disabled in settings).{C.RESET}")
+                        self.ui.error("Cannot double down after splitting (disabled in settings).")
                     else:
                         try:
                             player.double_down(self.shoe.draw_card(), hand, hand_index)
                             player.log_action("double", dealer_visible_card)
                         except ValueError as e:
-                            print(e)
+                            self.ui.error(str(e))
                             continue
+                        self.ui.log(f"{name} [gold1]doubles[/] → {card_markup(hand.cards[-1])}  ({hand_label(hand)})")
+                        self.ui.pause(self.deal_delay)
+                        if hand.is_busted():
+                            self.ui.log(f"{name} [red]busts[/] with {hand.calculate_value()}")
                         break
                 elif action == "split":
                     can_split = (self.split_limit == -1) or (len(player.hands) <= self.split_limit)
@@ -478,64 +662,74 @@ class BlackjackGame:
                             player.split(hand_index)
                             player.log_action("split", dealer_visible_card)
                         except ValueError as e:
-                            print(e)
+                            self.ui.error(str(e))
                             continue
+                        self.ui.log(f"{name} [gold1]splits[/] a pair of {esc(player.hands[hand_index].cards[0].rank)}s")
+                        self.ui.pause(self.deal_delay / 2)
                         player.hands[hand_index].add_card(self.shoe.draw_card())
-                        time.sleep(self.deal_delay)
+                        self.ui.pause(self.deal_delay)
                         player.hands[hand_index + 1].add_card(self.shoe.draw_card())
-                        time.sleep(self.deal_delay)
+                        self.ui.pause(self.deal_delay)
                         hand = player.hands[hand_index]
-                        print(f"\n  {C.DIM}── Hand {hand_index + 1} of {len(player.hands)} ──{C.RESET}")
                     else:
-                        print(f"  {C.RED}Cannot split: split limit of {self.split_limit} reached.{C.RESET}")
+                        self.ui.error(f"Cannot split: split limit of {self.split_limit} reached.")
                 else:
-                    print(f"  {C.RED}Invalid action.{C.RESET}")
+                    self.ui.error("Invalid action.")
 
             hand_index += 1
 
     def dealer_turn(self) -> None:
-        print(f"\n  {C.BOLD}Dealer's turn:{C.RESET}")
-        print(f"  Hand: {self.dealer.hands[0]}")
-        while self.dealer.hands[0].calculate_value() < 17:
-            self.dealer.hands[0].add_card(self.shoe.draw_card())
-            time.sleep(self.deal_delay)
-            print(f"  Dealer hits: {self.dealer.hands[0]}")
-        if self.dealer.hands[0].is_busted():
-            print(f"  {C.BOLD}{C.RED}Dealer busted!{C.RESET}")
+        self.phase = "dealer"
+        hand = self.dealer.hands[0]
+        self.ui.set_active(self.dealer)
+        self.ui.log(f"Dealer reveals {card_markup(hand.cards[0])}  ({hand_label(hand)})")
+        self.ui.pause(self.deal_delay)
+        while hand.calculate_value() < 17:
+            card = self.shoe.draw_card()
+            hand.add_card(card)
+            self.ui.log(f"Dealer hits → {card_markup(card)}  ({hand_label(hand)})")
+            self.ui.pause(self.deal_delay)
+        if hand.is_busted():
+            self.ui.log("[bold red]Dealer busts![/]")
+        else:
+            self.ui.log(f"Dealer stands on {hand.calculate_value()}")
 
     def offer_insurance(self) -> None:
         for player in self.players:
             if player.current_bet == 0:
                 continue
             max_insurance = player.current_bet / 2
-            print(f"\n  {C.BOLD}{player.name}{C.RESET}  Dealer shows Ace — insurance? (max ${max_insurance:.0f}, 0 to skip)")
+            self.ui.set_active(player)
             while True:
-                raw = input("  > ").strip()
+                raw = self.ui.ask(
+                    f"[bold]{esc(player.name)}[/] — dealer shows an Ace. Insurance? (up to {money(max_insurance)}, 0 to skip)",
+                    default="0")
                 try:
                     amount = float(raw)
                 except ValueError:
-                    print(f"  {C.RED}Enter a number.{C.RESET}")
+                    self.ui.error("Enter a number.")
                     continue
                 if amount < 0 or amount > max_insurance:
-                    print(f"  {C.RED}Insurance must be between $0 and ${max_insurance:.0f}.{C.RESET}")
+                    self.ui.error(f"Insurance must be between $0 and {money(max_insurance)}.")
                     continue
                 if amount > player.balance:
-                    print(f"  {C.RED}Insufficient balance.{C.RESET}")
+                    self.ui.error("Insufficient balance.")
                     continue
                 player.insurance_bet = amount
                 player.balance -= amount
                 if amount > 0:
-                    print(f"  {C.DIM}Insurance bet: ${amount:.0f}{C.RESET}")
+                    self.ui.log(f"[green3]{esc(player.name)}[/] takes insurance for {money(amount)}")
                 break
 
     def determine_winner(self, player: Player) -> None:
+        name = f"[bold]{esc(player.name)}[/]"
         # Resolve insurance before main hand
         if player.insurance_bet > 0:
             if self.dealer.hands[0].is_blackjack():
                 player.balance += player.insurance_bet * 3  # stake back + 2:1
-                print(f"  {C.BOLD}{player.name}{C.RESET}  Insurance  →  {C.GREEN}Won ${player.insurance_bet * 2:.0f}.{C.RESET}")
+                self.ui.log(f"{name} insurance pays [green]+{money(player.insurance_bet * 2)}[/]")
             else:
-                print(f"  {C.BOLD}{player.name}{C.RESET}  Insurance  →  {C.RED}Lost ${player.insurance_bet:.0f}.{C.RESET}")
+                self.ui.log(f"{name} insurance loses [red]-{money(player.insurance_bet)}[/]")
 
         dealer_value = self.dealer.hands[0].calculate_value()
 
@@ -543,64 +737,90 @@ class BlackjackGame:
             bet = player.hand_bets[i] if player.hand_bets and i < len(player.hand_bets) else player.current_bet
             player_value = hand.calculate_value()
             if hand.is_busted():
-                print(f"  {C.BOLD}{player.name}{C.RESET}  {player_value}  →  {C.RED}Busted! Lost ${bet}.{C.RESET}")
+                self.ui.log(f"{name} {player_value} · [red]bust -{money(bet)}[/]")
                 player.results.append("busted")
                 player.stats["bust"] += 1
             elif hand.is_blackjack():
                 winnings = bet * 2.5
                 player.balance += winnings
-                print(f"  {C.BOLD}{player.name}{C.RESET}  {player_value}  →  {C.GREEN}Blackjack! Won ${winnings}.{C.RESET}")
+                self.ui.log(f"{name} {player_value} · [bold gold1]blackjack +{money(bet * 1.5)}[/]")
                 player.results.append("blackjack")
                 player.stats["blackjack"] += 1
             elif dealer_value > 21 or player_value > dealer_value:
                 winnings = bet * 2
                 player.balance += winnings
-                print(f"  {C.BOLD}{player.name}{C.RESET}  {player_value}  →  {C.GREEN}Win! Won ${winnings}.{C.RESET}")
+                self.ui.log(f"{name} {player_value} · [green]win +{money(bet)}[/]")
                 player.results.append("win")
                 player.stats["win"] += 1
             elif player_value == dealer_value:
                 player.balance += bet
-                print(f"  {C.BOLD}{player.name}{C.RESET}  {player_value}  →  {C.CYAN}Push. ${bet} returned.{C.RESET}")
+                self.ui.log(f"{name} {player_value} · [grey70]push[/]")
                 player.results.append("push")
                 player.stats["push"] += 1
             else:
-                print(f"  {C.BOLD}{player.name}{C.RESET}  {player_value}  →  {C.RED}Lose. Lost ${bet}.{C.RESET}")
+                self.ui.log(f"{name} {player_value} · [red]lose -{money(bet)}[/]")
                 player.results.append("lose")
                 player.stats["lose"] += 1
+
+    def collect_bet(self, player: Player) -> None:
+        if isinstance(player, TrainableBot):
+            bet = player.choose_bet(self.shoe, DEFAULT_BET)
+            if float(bet) > 0:
+                player.place_bet(bet)
+                if bet != DEFAULT_BET:
+                    self.ui.log(f"[cyan]{esc(player.name)}[/] bets {money(bet)}  "
+                                f"[grey50]true count {self.shoe.true_count():+.1f}[/]")
+            return
+        if isinstance(player, CounterBot):
+            bet = player.choose_bet(self.shoe, DEFAULT_BET)
+            if float(bet) > 0:
+                player.place_bet(bet)
+                if bet != DEFAULT_BET:
+                    self.ui.log(f"[cyan]{esc(player.name)}[/] bets {money(bet)}  "
+                                f"[grey50]{player.bet_note()}[/]")
+            return
+        if isinstance(player, Bot):
+            bet = min(DEFAULT_BET, player.balance)
+            if float(bet) > 0:
+                player.place_bet(bet)
+            return
+
+        self.ui.set_active(player)
+        while True:
+            suggested = player.last_bet if 0 < player.last_bet <= player.balance else min(DEFAULT_BET, player.balance)
+            raw = self.ui.ask(
+                f"[bold]{esc(player.name)}[/] ([green]{money(player.balance)}[/]) — bet amount, 0 to sit out, /help for commands",
+                default=f"{suggested:g}")
+            if raw.startswith('/'):
+                self.parse_command(raw[1:])
+                continue
+            try:
+                bet = float(raw)
+                if bet.is_integer():
+                    bet = int(bet)
+            except ValueError:
+                self.ui.error("Bet must be a number.")
+                continue
+            if bet == 0:
+                self.ui.log(f"[grey62]{esc(player.name)} sits out this round[/]")
+                return
+            try:
+                player.place_bet(bet)
+            except ValueError as e:
+                self.ui.error(str(e))
+                continue
+            player.last_bet = bet
+            self.ui.log(f"[green3]{esc(player.name)}[/] bets {money(bet)}")
+            return
 
     def play_round(self) -> None:
         self.check_shoe()
         self.setup_round()
+        self.ui.log(f"[bold gold1]── Round {self.game_num} ──[/]")
 
-        for player in self.players + self.bots:
-            while True:
-                try:
-                    if isinstance(player, Bot) or isinstance(player, TrainableBot):
-                        global DEFAULT_BET
-                        bet = min(DEFAULT_BET, player.balance)
-                        if float(bet) == float(0): break
-                        player.place_bet(bet)
-                        break
-                    else:
-                        is_bet = False
-                        while not is_bet:
-                            print(f"\n  {C.BOLD}{player.name}{C.RESET}   Balance: {C.GREEN}${player.balance}{C.RESET}")
-                            bet = input("  Bet (or /command): ").strip()
-                            if bet.startswith('/'):
-                                self.parse_command(bet[1:])
-                            else:
-                                is_bet = True
-
-                        try:
-                            bet = int(bet)
-                        except:
-                            raise ValueError(f"  {C.RED}Bet must be a number.{C.RESET}")
-
-                        if bet > 0:
-                            player.place_bet(bet)
-                        break
-                except ValueError as e:
-                    print(e)
+        for player in self.seats:
+            self.collect_bet(player)
+        self.ui.set_active(None)
 
         self.deal_cards()
         self.display_table()
@@ -608,61 +828,80 @@ class BlackjackGame:
         if self.allow_insurance and self.dealer.hands[0].cards[1].rank == "Ace":
             self.offer_insurance()
 
-        for player in self.players + self.bots:
+        for player in self.seats:
             if player.current_bet > 0:
-                if isinstance(player, Bot) or isinstance(player, TrainableBot):
-                    player.play_turn(self.shoe, str(self.dealer.hands[0].cards[1]), self.deal_delay)
+                if isinstance(player, (Bot, TrainableBot)):
+                    player.play_turn(self.shoe, str(self.dealer.hands[0].cards[1]), self.deal_delay, ui=self.ui)
                 else:
                     self.player_turn(player)
 
         self.dealer_turn()
 
-        print(f"\n  {C.BOLD}{C.UNDERLINE}Results{C.RESET}")
-        dealer_value = self.dealer.hands[0].calculate_value()
-        print(f"  Dealer: {dealer_value}")
-        for player in self.players + self.bots:
+        for player in self.seats:
             if player.current_bet > 0:
                 self.determine_winner(player)
                 if isinstance(player, TrainableBot):
-                    player.update_final_reward(player.results[0] if player.results else "")
+                    player.learn_from_round(player.results[0] if player.results else "",
+                                            player.balance - player.round_start_balance, DEFAULT_BET)
+        self.phase = "results"
+        self.ui.set_active(None)
 
-        for player in self.players + self.bots:
+        # counters see every card that was shown this round
+        shown = [c.rank for c in self.dealer.hands[0].cards]
+        shown += [c.rank for p in self.seats for h in p.hands for c in h.cards]
+        for bot in self.bots:
+            if isinstance(bot, CounterBot):
+                bot.observe(shown, self.shoe)
+
+        for player in self.seats:
             self.balance_history[player.name].append(player.balance)
 
         global LOG_GAME
         if LOG_GAME: self.log_game()
+        self.ui.on_round_end(self)
+
+    def prepare_training(self, rounds: int) -> None:
+        '''Train mode: run a fixed number of rounds, and pace exploration to fit them.'''
+        self.train_rounds = rounds
+        self.train_until = self.game_num + rounds
+        self.deal_delay = 0
+        for bot in self.bots:
+            if isinstance(bot, TrainableBot) and bot.epsilon > bot.epsilon_min:
+                # decay so exploration bottoms out ~60% of the way through this run
+                steps = max(1, int(rounds * 0.6))
+                bot.epsilon_decay = (bot.epsilon_min / bot.epsilon) ** (1 / steps)
+
+    def rebuy_broke_bots(self) -> None:
+        '''Train mode: a bot that can't cover a bet gets a fresh stack so it keeps learning.'''
+        for bot in self.bots:
+            if bot.balance < DEFAULT_BET:
+                bot.balance = self.starting_balance
+                bot.rebuys = getattr(bot, "rebuys", 0) + 1
+                # rebase history so the top-up doesn't count as a winning round in the stats
+                self.balance_history[bot.name][-1] = bot.balance
+                self.ui.log(f"[magenta]{esc(bot.name)} rebuys for {money(self.starting_balance)} "
+                            f"(rebuy #{bot.rebuys})[/]")
 
     def play_game(self):
-        ai_done = False
-
+        self.ui.attach(self)
         while True:
-            clear()
-            print()
-            print(f'  {C.BOLD}{C.YELLOW}╔══════════════════════════════╗{C.RESET}')
-            print(f'  {C.BOLD}{C.YELLOW}║   ♠  BLACKJACK               ║{C.RESET}')
-            print(f'  {C.BOLD}{C.YELLOW}╚══════════════════════════════╝{C.RESET}')
-            print()
-            self.display_players()
+            if TRAIN_MODE:
+                if not self.bots or self.game_num >= self.train_until:
+                    break
+                self.rebuy_broke_bots()
+            self.play_round()
 
-            global DEFAULT_BET, TRAIN_MODE
-            if TRAIN_MODE and (not self.bots or self.bots[0].balance <= DEFAULT_BET):
-                ai_done = True
-            else:
-                self.play_round()
-
-            if TRAIN_MODE and not ai_done:
+            if TRAIN_MODE:
                 continue
 
-            while True:
-                print()
-                play_again = input("  Play another round? [Y/N]: ").strip().lower()
-                if play_again in ["y", "yes", "n", "no"]:
-                    break
-                print(f"  {C.RED}Enter Y or N.{C.RESET}")
-
-            if play_again in ["n", "no"] or ai_done:
-                self.end_game()
+            choice = None
+            while choice not in ("y", "n"):
+                choice = self.ui.choose("Round over.", [("y ", "y", "Next round"), ("nq", "n", "Quit")], default="y")
+                if choice not in ("y", "n"):
+                    self.ui.error("Enter Y or N.")
+            if choice == "n":
                 break
+        self.end_game()
 
     def log_game(self):
         log_entry = {
@@ -675,7 +914,7 @@ class BlackjackGame:
             "players": []
         }
 
-        for player in self.players + self.bots:
+        for player in self.seats:
             player_log = {
                 "name": player.name,
                 "bet": player.current_bet,
@@ -693,85 +932,64 @@ class BlackjackGame:
             }
             log_entry["players"].append(player_log)
 
-        with open(self.log_file, 'r') as file:
-            logs = json.load(file)
-        logs.append(log_entry)
+        self.log_entries.append(log_entry)
+        # rewriting the whole file each round gets slow over long training runs, so batch it there
+        if not TRAIN_MODE or len(self.log_entries) % 1000 == 0:
+            self.flush_log()
+
+    def flush_log(self) -> None:
+        if not LOG_GAME or not self.log_entries:
+            return
         with open(self.log_file, "w") as file:
-            json.dump(logs, file, indent=4)
+            json.dump(self.log_entries, file, indent=4)
 
     def check_shoe(self, force: bool = False):
         if (len(self.shoe) < (len(self.players) + len(self.bots) + 1) * 3) or force:
-            print(f"  {C.MAGENTA}Reshuffling deck...{C.RESET}")
+            self.ui.log("[magenta]Shuffling a fresh shoe…[/]")
             self.shoe = Shoe(self.num_decks)
             self.shoe.shuffle()
 
     def print_stats(self) -> None:
-        header = f"Session Stats — Round {self.game_num}"
-        print()
-        print(f'  {C.BOLD}{C.YELLOW}╔══════════════════════════════════════════════════════════╗{C.RESET}')
-        print(f'  {C.BOLD}{C.YELLOW}║  {header:<56}║{C.RESET}')
-        print(f'  {C.BOLD}{C.YELLOW}╚══════════════════════════════════════════════════════════╝{C.RESET}')
-        print()
-        print(f"  {C.BOLD}{'Player':<16} {'Net':>7}   {'W':>4} {'L':>4} {'P':>4} {'BJ':>4}   {'Win%':>6}{C.RESET}")
-        print(f"  {'─' * 56}")
-        for player in self.players + self.bots:
-            s = player.stats
-            history = self.balance_history.get(player.name, [])
-            init_bal = history[0] if history else player.balance
-            net = player.balance - init_bal
-            net_str = f"{C.GREEN}+${net:.0f}{C.RESET}" if net >= 0 else f"{C.RED}-${abs(net):.0f}{C.RESET}"
-            total_hands = s["win"] + s["lose"] + s["push"] + s["bust"] + s["blackjack"]
-            win_rate = (s["win"] + s["blackjack"]) / total_hands * 100 if total_hands > 0 else 0.0
+        self.ui.show_info(f"Session Stats — Round {self.game_num}", stats_table(self))
 
-            # largest single-round gain/loss from balance_history deltas
-            if len(history) > 1:
-                deltas = [history[i+1] - history[i] for i in range(len(history) - 1)]
-                best = max(deltas)
-                worst = min(deltas)
-                swing_str = f"  {C.DIM}best {C.GREEN}+${best:.0f}{C.RESET}{C.DIM}  worst {C.RED}-${abs(worst):.0f}{C.RESET}" if worst < 0 else f"  {C.DIM}best {C.GREEN}+${best:.0f}{C.RESET}"
-            else:
-                swing_str = ""
-
-            name_col = player.name[:15]
-            print(f"  {C.BOLD}{name_col:<16}{C.RESET} {net_str:>7}   {s['win']:>4} {s['lose']:>4} {s['push']:>4} {s['blackjack']:>4}   {win_rate:>5.1f}%{swing_str}")
-        print()
-
-    def end_game(self):
-        print()
-        print(f'  {C.BOLD}{C.YELLOW}╔══════════════════════════════╗{C.RESET}')
-        print(f'  {C.BOLD}{C.YELLOW}║        Final Balances        ║{C.RESET}')
-        print(f'  {C.BOLD}{C.YELLOW}╚══════════════════════════════╝{C.RESET}')
-        print()
-        for player in self.players + self.bots:
-            print(f"  {C.BOLD}{player.name}{C.RESET}: {C.GREEN}${player.balance}{C.RESET}")
-        print()
-
-        self.print_stats()
-
+    def save_models(self) -> None:
         for bot in self.bots:
             if isinstance(bot, TrainableBot):
-                bot_name = bot.name.replace(" ", "_")
-                save_model(bot.q_network, bot.optimizer, f"models/{bot_name}_model.pth", additional_data={"epsilon": bot.epsilon})
+                bot.save(f"models/{bot.name.replace(' ', '_')}_model.pth", log=self.ui.log)
 
-        global TRAIN_MODE
+    def end_game(self):
+        self.phase = "over"
+        self.ui.set_active(None)
+        self.flush_log()
+
+        self.save_models()
+
+        saved_msg = None
         if not TRAIN_MODE:
-            while True:
-                save_choice = input("  Save game? [Y/N]: ").strip().lower()
-                if save_choice in ["y", "yes", "n", "no"]:
-                    break
-                print(f"  {C.RED}Enter Y or N.{C.RESET}")
+            self.ui.set_overlay(f"Session Summary — {self.game_num} rounds", stats_table(self))
+            choice = None
+            while choice not in ("y", "n"):
+                choice = self.ui.choose("Save this game?", [("y", "y", "Save"), ("n", "n", "Don't save")])
+                if choice not in ("y", "n"):
+                    self.ui.error("Enter Y or N.")
 
-            if save_choice in ["y", "yes"]:
+            if choice == "y":
                 default_name = f"save_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}"
-                save_name = input(f"  Save name (Enter for '{default_name}'): ").strip()
-                if not save_name:
-                    save_name = default_name
-                self.save_game(save_name)
+                save_name = self.ui.ask("Save name", default=default_name)
+                saved_msg = self.save_game(save_name)
+                self.ui.wait_key(f"[green]{saved_msg}[/]  —  press any key to exit")
+
+        self.ui.clear_overlay()
+        self.ui.stop()
+
+        self.ui.print_after(stats_table(self))
+        if saved_msg:
+            self.ui.print_after(f"[green]{saved_msg}[/]")
 
         global SHOW_GRAPH
-        if SHOW_GRAPH: parse_log_and_plot(self.log_file)
+        if SHOW_GRAPH: parse_log_and_plot(self.log_file, log=self.ui.print_after)
 
-    def save_game(self, save_name: str):
+    def save_game(self, save_name: str) -> str:
         save_name = save_name.strip().replace(".json", "")
         save_path = f"saves/{save_name}.json"
 
@@ -793,222 +1011,310 @@ class BlackjackGame:
         with open(save_path, 'w') as f:
             json.dump(save_data, f, indent=4)
 
-        print(f"  {C.GREEN}Game saved to {save_path}{C.RESET}")
-        print(f"  Load with: python3 play_blackjack.py --load {save_name}")
+        msg = f"Saved to {save_path} — load with: python3 play_blackjack.py --load {save_name}"
+        self.ui.log(f"[green]{esc(msg)}[/]")
+        return msg
 
     def parse_command(self, command: str):
-        if command == 'help':
-            print()
-            print(f"  {C.BOLD}{C.UNDERLINE}Commands{C.RESET}")
-            print(f"  {C.DIM}/help{C.RESET}                                  Show this message")
-            print(f"  {C.DIM}/exit{C.RESET}                                  Quit the game")
-            print(f"  {C.DIM}/stats{C.RESET}                                 Show win/loss statistics")
-            print(f"  {C.DIM}/graph{C.RESET}                                 Show balance graph")
-            print(f"  {C.DIM}/editbalance [player] [balance]{C.RESET}        Edit a player's balance")
-            print(f"  {C.DIM}/showbalance{C.RESET}                           Show all balances")
-            print(f"  {C.DIM}/shuffle{C.RESET}                               Reshuffle the deck")
-            print(f"  {C.DIM}/save [name]{C.RESET}                           Save the game")
-            print(f"  {C.DIM}/load [name]{C.RESET}                           Info on loading a save")
-            print()
+        parts = command.split()
+        if not parts:
+            self.ui.error("Empty command — run /help for a list of commands.")
+            return
+        name = parts[0].lower()
 
-        elif command == 'exit':
+        if name == 'help':
+            self.ui.show_info("Commands", key_value_table(COMMANDS))
+
+        elif name == 'exit':
             self.end_game()
-            quit()
+            sys.exit(0)
 
-        elif command == 'stats':
+        elif name == 'stats':
             self.print_stats()
 
-        elif command == 'graph':
-            parse_log_and_plot(self.log_file, block=False)
+        elif name == 'graph':
+            parse_log_and_plot(self.log_file, block=False, log=self.ui.error)
 
-        elif command.split()[0] == 'editbalance':
-            parts = command.split()
+        elif name == 'editbalance':
             if len(parts) < 3:
-                print(f"  {C.RED}Usage: /editbalance [player name] [new balance]{C.RESET}")
+                self.ui.error("Usage: /editbalance [player name] [new balance]")
                 return
             new_balance_str = parts[-1]
             player_name = ' '.join(parts[1:-1])
-            target_player = None
-            for player in self.players + self.bots:
-                if player.name.lower() == player_name.lower():
-                    target_player = player
-                    break
+            target_player = next((p for p in self.seats if p.name.lower() == player_name.lower()), None)
             if target_player is None:
-                print(f"  {C.RED}Player '{player_name}' not found.{C.RESET}")
+                self.ui.error(f"Player '{player_name}' not found.")
                 return
             try:
                 new_balance = float(new_balance_str)
-                if new_balance < 0:
-                    print(f"  {C.RED}Balance cannot be negative.{C.RESET}")
-                    return
-                old_balance = target_player.balance
-                target_player.balance = new_balance
-                print(f"  {C.GREEN}{target_player.name}: ${old_balance} → ${new_balance}{C.RESET}")
             except ValueError:
-                print(f"  {C.RED}Invalid balance — must be a number.{C.RESET}")
+                self.ui.error("Invalid balance — must be a number.")
+                return
+            if new_balance < 0:
+                self.ui.error("Balance cannot be negative.")
+                return
+            old_balance = target_player.balance
+            target_player.balance = new_balance
+            self.ui.log(f"[magenta]{esc(target_player.name)}: {money(old_balance)} → {money(new_balance)}[/]")
 
-        elif command == 'showbalance':
-            print()
-            print(f"  {C.BOLD}Balances{C.RESET}")
-            for player in self.players + self.bots:
-                print(f"  {player.name}: {C.GREEN}${player.balance}{C.RESET}")
-            print()
+        elif name == 'showbalance':
+            rows = [(esc(p.name), f"[green]{money(p.balance)}[/]") for p in self.seats]
+            self.ui.show_info("Balances", key_value_table(rows, key_style="bold"))
 
-        elif command == 'shuffle':
+        elif name == 'shuffle':
             self.check_shoe(force=True)
 
-        elif command.split()[0] == 'godmode':
+        elif name == 'godmode':
             global GOD_MODE
-            parts = command.split()
             if parts[-1] == "on":
                 GOD_MODE = True
-                print(f"  {C.MAGENTA}GOD MODE ON{C.RESET}")
+                self.ui.log("[magenta]GOD MODE ON[/]")
             elif parts[-1] == "off":
                 GOD_MODE = False
-                print(f"  {C.MAGENTA}GOD MODE OFF{C.RESET}")
+                self.ui.log("[magenta]GOD MODE OFF[/]")
 
-        elif command.split()[0] == 'save':
-            parts = command.split(maxsplit=1)
-            save_name = parts[1].strip() if len(parts) > 1 else f"save_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}"
+        elif name == 'save':
+            split = command.split(maxsplit=1)
+            save_name = split[1].strip() if len(split) > 1 else f"save_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}"
             self.save_game(save_name)
 
-        elif command.split()[0] == 'load':
-            print(f"  {C.CYAN}To load a save: python3 play_blackjack.py --load <save name>{C.RESET}")
+        elif name == 'load':
+            self.ui.error("To load a save: python3 play_blackjack.py --load <save name>")
 
         else:
-            print(f"  {C.RED}Unknown command — run /help for a list of commands.{C.RESET}")
+            self.ui.error("Unknown command — run /help for a list of commands.")
+
+
+PLAY_ACTIONS = ["hit", "stand", "double"]
+BET_MULTIPLIERS = [1, 2, 4, 6, 8]   # bet sizes the NN bot can pick, in units of default_bet
+MODEL_ARCH = "v5"                    # bump when the network shapes or state features change
 
 
 class QNetwork(nn.Module):
-    def __init__(self, state_size, action_size):
-        super(QNetwork, self).__init__()
-        self.fc1 = nn.Linear(state_size, 128)
-        self.fc2 = nn.Linear(128, 64)
-        self.fc3 = nn.Linear(64, action_size)
+    '''Small MLP: state -> one Q-value per action.'''
+
+    def __init__(self, state_size: int, action_size: int, hidden=(64, 32)):
+        super().__init__()
+        layers, prev = [], state_size
+        for width in hidden:
+            layers += [nn.Linear(prev, width), nn.ReLU()]
+            prev = width
+        layers.append(nn.Linear(prev, action_size))
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x):
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        return self.fc3(x)
+        return self.net(x)
+
+
+def _masked_argmax(q_values: torch.Tensor, valid: List[bool]) -> int:
+    q = q_values.clone()
+    q[~torch.tensor(valid)] = -float("inf")
+    return int(torch.argmax(q).item())
 
 
 class TrainableBot(Player):
-    def __init__(self, name, balance, state_size, action_size, epsilon=1.0, epsilon_decay=0.995, epsilon_min=0.01):
+    '''
+    Q-learning bot with two networks:
+
+      play network  [hand total/21, soft hand, can double, dealer upcard/11] -> Q(hit, stand, double)
+      bet network   [true count/10, shoe penetration]                        -> Q(bet 1x, 2x, 4x, 6x, 8x)
+
+    Play rewards are in units of the hand's stake (doubling counts double). Bet rewards are the
+    round's net result in units of default_bet, so the bet network learns expected profit per bet size.
+    '''
+
+    PLAY_FEATURES = 4
+    BET_FEATURES = 2
+
+    def __init__(self, name, balance, epsilon=1.0, epsilon_decay=0.995, epsilon_min=0.01,
+                 batch_size=64, target_sync=250, updates_per_round=4):
         super().__init__(name, balance)
-        self.q_network = QNetwork(state_size, action_size)
-        self.optimizer = optim.Adam(self.q_network.parameters(), lr=0.001)
-        self.criterion = nn.MSELoss()
+        self.q_network = QNetwork(self.PLAY_FEATURES, len(PLAY_ACTIONS), hidden=(64, 32))
+        self.target_network = QNetwork(self.PLAY_FEATURES, len(PLAY_ACTIONS), hidden=(64, 32))
+        self.target_network.load_state_dict(self.q_network.state_dict())
+        self.optimizer = optim.Adam(self.q_network.parameters(), lr=1e-3)
+
+        self.bet_network = QNetwork(self.BET_FEATURES, len(BET_MULTIPLIERS), hidden=(32, 16))
+        self.bet_optimizer = optim.Adam(self.bet_network.parameters(), lr=1e-3)
+
+        self.criterion = nn.SmoothL1Loss()
         self.epsilon = epsilon
         self.epsilon_decay = epsilon_decay
         self.epsilon_min = epsilon_min
-        self.gamma = 0.95
-        self.memory = []
+        self.gamma = 1.0          # episodes are a few steps long and only the end pays out: no discounting
+        self.batch_size = batch_size
+        self.target_sync = target_sync
+        self.updates_per_round = updates_per_round
+        self.train_steps = 0
 
-    def get_state(self, hand, dealer_visible_card):
-        hand_value = hand.calculate_value() / 21.0
-        dealer_value = get_card_value(dealer_visible_card) / 11.0
-        return np.array([hand_value, dealer_value])
+        self.memory = deque(maxlen=50_000)       # (state, action_idx, reward, next_state, done)
+        self.bet_memory = deque(maxlen=20_000)   # (state, multiplier_idx, reward)
+        self.trajectory = []                     # this round's (state, action_idx) decisions
+        self.doubled = False
+        self.bet_state = None
+        self.bet_action = None
 
-    def choose_action(self, state):
+    # ── state ────────────────────────────────────────────────────────────────
+    def get_state(self, hand: Hand, dealer_visible_card: str, can_double: bool) -> np.ndarray:
+        total, soft = hand_total(hand)
+        return np.array([total / 21.0, float(soft), float(can_double),
+                         get_card_value(dealer_visible_card) / 11.0], dtype=np.float32)
+
+    @staticmethod
+    def get_bet_state(shoe: Shoe) -> np.ndarray:
+        return np.array([max(-1.0, min(1.0, shoe.true_count() / 10.0)), shoe.penetration()], dtype=np.float32)
+
+    # ── decisions ────────────────────────────────────────────────────────────
+    def choose_action(self, state: np.ndarray) -> int:
+        valid = [True, True, bool(state[2])]
         if random.random() < self.epsilon:
-            return random.choice(["hit", "stand", "double"])
+            return random.choice([i for i, ok in enumerate(valid) if ok])
+        with torch.no_grad():
+            return _masked_argmax(self.q_network(torch.from_numpy(state)), valid)
+
+    def choose_bet(self, shoe: Shoe, base_bet) -> float:
+        '''Pick a bet size from the count. Falls back to whatever is left if below one unit.'''
+        self.bet_state = self.bet_action = None
+        if self.balance < base_bet:
+            return self.balance
+        valid = [m * base_bet <= self.balance for m in BET_MULTIPLIERS]
+        state = self.get_bet_state(shoe)
+        if random.random() < self.epsilon:
+            idx = random.choice([i for i, ok in enumerate(valid) if ok])
         else:
-            state_tensor = torch.tensor(state, dtype=torch.float32)
-            q_values = self.q_network(state_tensor)
-            return ["hit", "stand", "double"][torch.argmax(q_values).item()]
+            with torch.no_grad():
+                idx = _masked_argmax(self.bet_network(torch.from_numpy(state)), valid)
+        self.bet_state, self.bet_action = state, idx
+        return BET_MULTIPLIERS[idx] * base_bet
 
-    def store_experience(self, state, action, reward, next_state, done):
-        self.memory.append((state, action, reward, next_state, done))
+    # ── play ─────────────────────────────────────────────────────────────────
+    def play_turn(self, shoe, dealer_visible_card, deal_delay: int, ui=None):
+        ui = ui or NULL_UI
+        name = f"[cyan]{esc(self.name)}[/]"
+        self.trajectory = []
+        self.doubled = False
 
-    def replay(self, batch_size=32):
-        if len(self.memory) < batch_size:
-            return
-        batch = random.sample(self.memory, batch_size)
-        for state, action, reward, next_state, done in batch:
-            state_tensor = torch.tensor(state, dtype=torch.float32)
-            next_state_tensor = torch.tensor(next_state, dtype=torch.float32)
-            reward_tensor = torch.tensor(reward, dtype=torch.float32)
-            done_tensor = torch.tensor(done, dtype=torch.float32)
-            q_values = self.q_network(state_tensor)
-            target = q_values.clone().detach()
-            action_index = ["hit", "stand", "double"].index(action)
-            if done:
-                target[action_index] = reward
+        hand = self.hands[0]  # the NN bot never splits
+        ui.set_active(self, 0)
+        ui.pause(deal_delay / 2)
+        while not hand.is_blackjack() and not hand.is_busted() and hand.calculate_value() < 21:
+            stake = self.hand_bets[0] if self.hand_bets else self.current_bet
+            can_double = hand.num_cards() == 2 and self.balance >= stake
+            state = self.get_state(hand, dealer_visible_card, can_double)
+            idx = self.choose_action(state)
+            self.trajectory.append((state, idx))
+            action = PLAY_ACTIONS[idx]
+            tag = f"  [grey50]ε {self.epsilon:.3f}[/]"
+
+            if action == "hit":
+                card = shoe.draw_card()
+                hand.add_card(card)
+                ui.log(f"{name} hits → {card_markup(card)}  ({hand_label(hand)}){tag}")
+                ui.pause(deal_delay)
+            elif action == "stand":
+                ui.log(f"{name} stands on {hand_label(hand)}{tag}")
+                ui.pause(deal_delay / 2)
+                break
+            else:  # double
+                self.balance -= stake
+                self.hand_bets[0] = stake * 2
+                self.doubled = True
+                card = shoe.draw_card()
+                hand.add_card(card)
+                ui.log(f"{name} [gold1]doubles[/] → {card_markup(card)}  ({hand_label(hand)}){tag}")
+                ui.pause(deal_delay)
+                break
+        if hand.is_busted():
+            ui.log(f"{name} [red]busts[/] with {hand.calculate_value()}")
+
+    # ── learning ─────────────────────────────────────────────────────────────
+    def learn_from_round(self, result: str, net_change: float, base_bet: float) -> None:
+        '''Credit the round's outcome to every decision that led to it, then train both networks.'''
+        outcome = {"blackjack": 1.5, "win": 1.0, "push": 0.0, "lose": -1.0, "busted": -1.0}.get(result, 0.0)
+        if self.doubled:
+            outcome *= 2
+        for t, (state, idx) in enumerate(self.trajectory):
+            if t == len(self.trajectory) - 1:
+                self.memory.append((state, idx, outcome, state, True))    # final decision gets the payout
             else:
-                next_q_values = self.q_network(next_state_tensor)
-                target[action_index] = reward + self.gamma * torch.max(next_q_values)
-            self.optimizer.zero_grad()
-            loss = self.criterion(q_values, target)
-            loss.backward()
-            self.optimizer.step()
+                self.memory.append((state, idx, 0.0, self.trajectory[t + 1][0], False))
+        self.trajectory = []
+
+        if self.bet_state is not None and base_bet:
+            self.bet_memory.append((self.bet_state, self.bet_action, net_change / base_bet))
+            self.bet_state = self.bet_action = None
+
+        for _ in range(self.updates_per_round):
+            self.replay()
+            self.replay_bets()
         self.epsilon = max(self.epsilon * self.epsilon_decay, self.epsilon_min)
 
-    def play_turn(self, shoe, dealer_visible_card, deal_delay: int):
-        self.last_state = None
-        self.last_action = None
-
-        for hand in self.hands:
-            print(f"\n  {C.BOLD}{self.name}{C.RESET}'s turn:")
-            print(f"  Hand: {hand}")
-            while not hand.is_blackjack() and not hand.is_busted():
-                state = self.get_state(hand, dealer_visible_card)
-                action = self.choose_action(state)
-                print(f"  {C.DIM}{self.name} → {action}  (ε: {self.epsilon:.3f}){C.RESET}")
-                if action == "hit":
-                    card = shoe.draw_card()
-                    hand.add_card(card)
-                    next_state = self.get_state(hand, dealer_visible_card)
-                    if hand.is_busted():
-                        reward = -1
-                        done = True
-                    else:
-                        reward = 0
-                        done = False
-                    self.store_experience(state, "hit", reward, next_state, done)
-                    self.last_state = next_state
-                    self.last_action = "hit"
-                    time.sleep(deal_delay)
-                    print(f"  {self.name} hits: {hand}")
-                elif action == "stand":
-                    self.last_state = state
-                    self.last_action = "stand"
-                    break
-                elif action == "double" and self.balance >= self.current_bet:
-                    bet = self.hand_bets[0] if self.hand_bets else self.current_bet
-                    self.balance -= bet
-                    self.hand_bets[0] = bet * 2
-                    card = shoe.draw_card()
-                    hand.add_card(card)
-                    next_state = self.get_state(hand, dealer_visible_card)
-                    reward = -1 if hand.is_busted() else 0
-                    self.store_experience(state, "double", reward, next_state, True)
-                    self.last_state = next_state
-                    self.last_action = "double"
-                    break
-
-    def update_final_reward(self, result):
-        if self.last_state is None:
+    def replay(self) -> None:
+        if len(self.memory) < self.batch_size:
             return
-        if result == "blackjack":
-            reward = 1.5
-        elif result == "win":
-            reward = 1.0
-        elif result == "push":
-            reward = 0.0
-        elif result in ("lose", "busted"):
-            reward = -1.0
-        else:
-            reward = 0.0
-        if self.last_action and result != "busted":
-            self.store_experience(self.last_state, self.last_action, reward, self.last_state, True)
-        self.replay()
+        batch = random.sample(self.memory, self.batch_size)
+        states = torch.from_numpy(np.stack([b[0] for b in batch]))
+        actions = torch.tensor([b[1] for b in batch])
+        rewards = torch.tensor([b[2] for b in batch], dtype=torch.float32)
+        next_states = torch.from_numpy(np.stack([b[3] for b in batch]))
+        dones = torch.tensor([b[4] for b in batch], dtype=torch.float32)
 
-    def save_model(self, file_path):
-        save_model(self.q_network, self.optimizer, file_path, additional_data={"epsilon": self.epsilon})
+        q = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+        with torch.no_grad():
+            next_q = self.target_network(next_states)
+            next_q[next_states[:, 2] < 0.5, 2] = -float("inf")   # can't double after a hit
+            target = rewards + self.gamma * next_q.max(dim=1).values * (1 - dones)
 
-    def load_model(self, file_path):
-        additional_data = load_model(self.q_network, self.optimizer, file_path)
-        self.epsilon = additional_data.get("epsilon", 1.0)
+        loss = self.criterion(q, target)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        self.train_steps += 1
+        if self.train_steps % self.target_sync == 0:
+            self.target_network.load_state_dict(self.q_network.state_dict())
+
+    def replay_bets(self) -> None:
+        if len(self.bet_memory) < self.batch_size:
+            return
+        batch = random.sample(self.bet_memory, self.batch_size)
+        states = torch.from_numpy(np.stack([b[0] for b in batch]))
+        actions = torch.tensor([b[1] for b in batch])
+        rewards = torch.tensor([b[2] for b in batch], dtype=torch.float32)
+        q = self.bet_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+        loss = self.criterion(q, rewards)   # one-step: each bet's value is just its round result
+        self.bet_optimizer.zero_grad()
+        loss.backward()
+        self.bet_optimizer.step()
+
+    # ── persistence ──────────────────────────────────────────────────────────
+    def save(self, file_path: str, log=None) -> None:
+        torch.save({
+            "arch": MODEL_ARCH,
+            "play_state_dict": self.q_network.state_dict(),
+            "play_optimizer": self.optimizer.state_dict(),
+            "bet_state_dict": self.bet_network.state_dict(),
+            "bet_optimizer": self.bet_optimizer.state_dict(),
+            "additional_data": {"epsilon": self.epsilon, "train_steps": self.train_steps},
+        }, file_path)
+        if log:
+            log(f"[grey50]Model saved to {esc(file_path)}[/]")
+
+    def load(self, file_path: str, log=None) -> dict:
+        '''Load a checkpoint. Raises FileNotFoundError, or ValueError for an older architecture.'''
+        checkpoint = torch.load(file_path)
+        if checkpoint.get("arch") != MODEL_ARCH:
+            raise ValueError(f"{file_path} is from an older model version")
+        self.q_network.load_state_dict(checkpoint["play_state_dict"])
+        self.target_network.load_state_dict(checkpoint["play_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["play_optimizer"])
+        self.bet_network.load_state_dict(checkpoint["bet_state_dict"])
+        self.bet_optimizer.load_state_dict(checkpoint["bet_optimizer"])
+        extra = checkpoint.get("additional_data", {})
+        self.train_steps = extra.get("train_steps", 0)
+        if log:
+            log(f"[grey50]Model loaded from {esc(file_path)}[/]")
+        return extra
 
 
 #== Functions ==#
@@ -1023,15 +1329,15 @@ def get_card_value(card_str: str) -> int:
         return int(rank)
 
 
-def parse_log_and_plot(log_file, block=True):
+def parse_log_and_plot(log_file, block=True, log=print):
     try:
         with open(log_file, 'r') as file:
             logs = json.load(file)
     except FileNotFoundError:
-        print(f"  {C.RED}Log file {log_file} not found.{C.RESET}")
+        log(f"Log file {log_file} not found.")
         return
     except json.JSONDecodeError:
-        print(f"  {C.RED}Failed to parse log file {log_file}.{C.RESET}")
+        log(f"Failed to parse log file {log_file}.")
         return
 
     with open('game_settings.json', 'r') as file:
@@ -1069,26 +1375,66 @@ def parse_log_and_plot(log_file, block=True):
         plt.grid(True)
         plt.legend()
         plt.show(block=block)
+        if not block:
+            plt.pause(0.001)  # let the window draw without blocking the game
     except IndexError:
-        print(f'  {C.YELLOW}Cannot create graph — no data yet.{C.RESET}')
+        log("Cannot create graph — no data yet.")
 
 
-def save_model(model, optimizer, file_path, additional_data=None):
-    checkpoint = {
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "additional_data": additional_data
-    }
-    torch.save(checkpoint, file_path)
-    print(f"  {C.DIM}Model saved to {file_path}{C.RESET}")
+def settings_summary(settings: dict) -> str:
+    bots = ", ".join(f"{esc(b['name'])} [grey50]({esc(b['strategy'])})[/]" for b in settings.get("bots", [])) or "none"
+    decks = settings["num_decks"]
+    return (f"{decks} deck{'s' if decks != 1 else ''} · start {money(settings['init_balance'])} · "
+            f"bot bet {money(settings['default_bet'])} · deal {settings['deal_delay']:g}s\nBots: {bots}")
 
 
-def load_model(model, optimizer, file_path):
-    checkpoint = torch.load(file_path)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-    print(f"  {C.DIM}Model loaded from {file_path}{C.RESET}")
-    return checkpoint.get("additional_data", {})
+def apply_settings(settings: dict) -> None:
+    global SHOW_OUTPUT, LOG_GAME, SHOW_GRAPH, DEFAULT_BET
+    SHOW_OUTPUT = bool(settings["show_output"])
+    LOG_GAME = bool(settings["log_game"])
+    SHOW_GRAPH = bool(settings["show_graph"])
+    DEFAULT_BET = settings["default_bet"]
+
+
+def open_settings(ui, settings: dict) -> None:
+    if edit_settings(ui, settings, SETTINGS_FIELDS, BOT_STRATEGIES):
+        with open(SETTINGS_FILE, 'w') as file:
+            json.dump(settings, file, indent=4)
+        ui.log(f"[green]Settings saved to {SETTINGS_FILE}[/]")
+    ui.splash_info = settings_summary(settings)
+    ui.refresh()
+
+
+def ask_player_names(ui, settings: Optional[dict] = None) -> List[str]:
+    players = []
+    if settings is not None:
+        ui.splash_info = settings_summary(settings)
+    while True:
+        hint = "Enter to start" if players else "at least one player needed"
+        if settings is not None:
+            hint += " · Tab or /settings for settings"
+        name = ui.ask(f"[bold]Player {len(players) + 1}[/] name ([grey62]{hint}[/])",
+                      hotkeys={"tab": "/settings"} if settings is not None else None).strip()
+        if name.lower() == "/settings" and settings is not None:
+            open_settings(ui, settings)
+            continue
+        if not name or name.lower() == "done":
+            if players:
+                return players
+            ui.error("Must have at least one player.")
+        elif name.lower() in (p.lower() for p in players):
+            ui.error(f"'{name}' is already at the table.")
+        else:
+            players.append(name)
+            ui.add_splash_name(name)
+
+
+def make_ui(train_mode: bool, show_output: bool):
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return HeadlessUI(verbose=show_output or not train_mode, progress=train_mode)
+    if train_mode and not show_output:
+        return HeadlessUI(verbose=False, progress=True)
+    return RichUI()
 
 
 #== Main ==#
@@ -1096,25 +1442,33 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--train", action='store_true', help="Train AI mode — no player interaction")
     parser.add_argument("--load", type=str, default=None, help="Load a saved game by save name")
+    parser.add_argument("--train-counter", type=int, nargs="?", const=8000, default=None, metavar="STEPS",
+                        help="Train the card-counting LSTM on simulated shoes (default 8000 steps)")
     args = parser.parse_args()
 
-    with open('game_settings.json', 'r') as file:
+    if args.train_counter is not None:
+        os.makedirs("models", exist_ok=True)
+        print(f"Training the card-counting LSTM for {args.train_counter:,} steps on simulated shoes…")
+        model = train_counter(steps=args.train_counter)
+        save_counter(model, COUNTER_MODEL_PATH)
+        print("Average true-count error by shoe size (lower is better):")
+        for decks in (1, 2, 6, 8):
+            print(f"  {decks} deck{'s' if decks > 1 else ' '}: {evaluate_counter(model, shoes=20, decks=decks):.2f}")
+        print(f"Saved to {COUNTER_MODEL_PATH}")
+        return
+
+    with open(SETTINGS_FILE, 'r') as file:
         settings = json.load(file)
 
-    global SHOW_OUTPUT, LOG_GAME, SHOW_GRAPH, DEFAULT_BET, TRAIN_MODE
-    SHOW_OUTPUT = bool(settings["show_output"])
-    LOG_GAME = bool(settings["log_game"])
-    SHOW_GRAPH = bool(settings["show_graph"])
-    DEFAULT_BET = settings["default_bet"]
+    global SHOW_GRAPH, TRAIN_MODE
+    apply_settings(settings)
     TRAIN_MODE = args.train
 
-    if SHOW_GRAPH and not LOG_GAME:
-        print(f"  {C.YELLOW}show_graph is enabled but log_game is false — graph will be skipped.{C.RESET}")
-        SHOW_GRAPH = False
+    ui = make_ui(TRAIN_MODE, SHOW_OUTPUT)
 
     if TRAIN_MODE and not settings.get('bots'):
-        print(f"  {C.RED}Train mode requires at least one bot configured in game_settings.json.{C.RESET}")
-        quit()
+        print("Train mode requires at least one bot configured in game_settings.json.")
+        sys.exit(1)
 
     save_data = None
     if args.load:
@@ -1123,59 +1477,68 @@ def main():
         try:
             with open(save_path, 'r') as f:
                 save_data = json.load(f)
-            print(f"  {C.GREEN}Loaded save: {save_name}{C.RESET}")
+            ui.log(f"[green]Loaded save: {esc(save_name)}[/]")
         except FileNotFoundError:
-            print(f"  {C.RED}Save file '{save_path}' not found.{C.RESET}")
-            quit()
+            print(f"Save file '{save_path}' not found.")
+            sys.exit(1)
 
-    clear()
-    print()
-    print(f'  {C.BOLD}{C.YELLOW}╔══════════════════════════════╗{C.RESET}')
-    print(f'  {C.BOLD}{C.YELLOW}║   ♠  BLACKJACK               ║{C.RESET}')
-    print(f'  {C.BOLD}{C.YELLOW}╚══════════════════════════════╝{C.RESET}')
-    print()
+    bj_game = None
+    try:
+        ui.start()
 
-    players = []
-    i = 1
+        if save_data:
+            players = [p["name"] for p in save_data["players"]]
+        elif TRAIN_MODE:
+            players = []
+        else:
+            players = ask_player_names(ui, settings)
 
-    if save_data:
-        players = [p["name"] for p in save_data["players"]]
-    else:
-        while True:
-            if TRAIN_MODE:
-                break
-            player_i = input(f"  Player {i} name ('done' to start): ").strip()
-            if player_i.lower() != "done":
-                players.append(player_i)
-                i += 1
-            else:
-                if players:
-                    break
-                print(f"  {C.RED}Must have at least one player.{C.RESET}")
+        apply_settings(settings)  # pick up anything changed in the settings editor
+        if SHOW_GRAPH and not LOG_GAME:
+            ui.log("[yellow]Balance graph needs game logging on — graph will be skipped.[/]")
+            SHOW_GRAPH = False
 
-    if LOG_GAME:
-        if not os.path.exists("logs"):
-            os.mkdir("logs")
-        log_file = f'logs/session_{datetime.now().strftime("%Y-%m-%d_%H%M%S")}.json'
-        with open(log_file, 'w') as file:
-            file.write("[]")
-    else:
-        log_file = 'logs/session_NULL.json'
+        if LOG_GAME:
+            if not os.path.exists("logs"):
+                os.mkdir("logs")
+            log_file = f'logs/session_{datetime.now().strftime("%Y-%m-%d_%H%M%S")}.json'
+            with open(log_file, 'w') as file:
+                file.write("[]")
+        else:
+            log_file = 'logs/session_NULL.json'
 
-    bj_game = BlackjackGame(
-        num_decks=settings['num_decks'],
-        player_names=players,
-        bot_info=settings['bots'],
-        starting_balance=settings['init_balance'],
-        log_file=log_file,
-        deal_delay=settings['deal_delay'],
-        allow_double_after_split=settings.get('allow_double_after_split', True),
-        split_limit=settings.get('split_limit', 1),
-        allow_insurance=settings.get('allow_insurance', True),
-        save_data=save_data
-    )
+        bj_game = BlackjackGame(
+            num_decks=settings['num_decks'],
+            player_names=players,
+            bot_info=settings['bots'],
+            starting_balance=settings['init_balance'],
+            log_file=log_file,
+            deal_delay=settings['deal_delay'],
+            allow_double_after_split=settings.get('allow_double_after_split', True),
+            split_limit=settings.get('split_limit', 1),
+            allow_insurance=settings.get('allow_insurance', True),
+            save_data=save_data,
+            ui=ui,
+            counter_max_spread=int(settings.get("counter", {}).get("max_spread", 8)),
+        )
 
-    bj_game.play_game()
+        if TRAIN_MODE:
+            rounds = int(settings.get("train_param", {}).get("rounds", 60000))
+            bj_game.prepare_training(rounds)
+            ui.log(f"[bold]Training for {rounds:,} rounds[/] (deal delay off)")
+
+        bj_game.play_game()
+    except (KeyboardInterrupt, EOFError):
+        ui.stop()
+        if TRAIN_MODE and bj_game is not None:
+            bj_game.flush_log()
+            bj_game.save_models()
+            print(f"\nTraining stopped after {bj_game.game_num:,} rounds — models saved.")
+        else:
+            print("\nGame interrupted — progress since the last save was not kept.")
+        sys.exit(130)
+    finally:
+        ui.stop()
 
 
 if __name__ == "__main__":
