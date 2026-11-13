@@ -3,7 +3,7 @@
 Play blackjack in terminal
 
 Author: Ian Jackson
-Version v5.0
+Version v5.1
 '''
 
 import random
@@ -35,6 +35,9 @@ SHOW_GRAPH = True
 DEFAULT_BET = 10
 TRAIN_MODE = False
 GOD_MODE = False
+# Set while running inside Terminal Casino (see play_as_plugin / plugin.py). The casino owns the
+# player's money, so commands that create or persist it are off, and leaving returns to the lobby.
+PLUGIN_MODE = False
 
 NULL_UI = HeadlessUI(verbose=False)
 
@@ -77,6 +80,18 @@ COMMANDS = [
     ("/save [name]", "Save the game"),
     ("/load [name]", "Info on loading a save"),
 ]
+PLUGIN_COMMANDS = [
+    ("/help  or  ?", "Show this message"),
+    ("/leave  or  Esc", "Leave the table and return to the casino"),
+    ("/stats", "Show win/loss statistics"),
+    ("/showbalance", "Show all balances"),
+    ("/shuffle", "Reshuffle the deck"),
+]
+CASINO_DISABLED = {"editbalance", "godmode", "save", "load", "graph"}
+
+
+class LeaveTable(Exception):
+    '''Raised from deep inside a round (plugin mode) to leave the table.'''
 
 #== Classes ==#
 
@@ -514,6 +529,7 @@ class BlackjackGame:
         self.split_limit = split_limit if split_limit != 0 else 1
         self.allow_insurance = allow_insurance
         self.phase = "betting"
+        self.plugin_mode = PLUGIN_MODE
 
         saved_player_balances = {}
         saved_bot_balances = {}
@@ -817,9 +833,15 @@ class BlackjackGame:
         self.ui.set_active(player)
         while True:
             suggested = player.last_bet if 0 < player.last_bet <= player.balance else min(DEFAULT_BET, player.balance)
-            raw = self.ui.ask(
-                f"[bold]{esc(player.name)}[/] ([green]{money(player.balance)}[/]) — bet amount, 0 to sit out, /help for commands",
-                default=f"{suggested:g}")
+            if self.plugin_mode:
+                raw = self.ui.ask(
+                    f"[bold]{esc(player.name)}[/] ([green]{money(player.balance)}[/]) — place your bet, 0 to sit out  "
+                    f"[grey62]Esc leave table · ? help[/]",
+                    default=f"{suggested:g}", hotkeys={"esc": "/leave", "?": "/help"})
+            else:
+                raw = self.ui.ask(
+                    f"[bold]{esc(player.name)}[/] ([green]{money(player.balance)}[/]) — bet amount, 0 to sit out, /help for commands",
+                    default=f"{suggested:g}")
             if raw.startswith('/'):
                 self.parse_command(raw[1:])
                 continue
@@ -920,6 +942,14 @@ class BlackjackGame:
 
     def play_game(self):
         self.ui.attach(self)
+        try:
+            self._round_loop()
+        except LeaveTable:
+            pass
+        self.end_game()
+
+    def _round_loop(self) -> None:
+        leave = (("l", "q", "esc"), "n", "Leave table") if self.plugin_mode else ("nq", "n", "Quit")
         while True:
             if TRAIN_MODE:
                 if not self.bots or self.game_num >= self.train_until:
@@ -932,12 +962,11 @@ class BlackjackGame:
 
             choice = None
             while choice not in ("y", "n"):
-                choice = self.ui.choose("Round over.", [("y ", "y", "Next round"), ("nq", "n", "Quit")], default="y")
+                choice = self.ui.choose("Round over.", [("y ", "y", "Next round"), leave], default="y")
                 if choice not in ("y", "n"):
                     self.ui.error("Enter Y or N.")
             if choice == "n":
                 break
-        self.end_game()
 
     def log_game(self):
         log_entry = {
@@ -1000,6 +1029,14 @@ class BlackjackGame:
 
         self.save_models()
 
+        if self.plugin_mode:
+            # the casino takes the terminal straight back, so the summary has to be shown in our UI
+            self.ui.set_overlay(f"Session Summary — {self.game_num} rounds", stats_table(self))
+            self.ui.wait_key("Press any key to return to the casino")
+            self.ui.clear_overlay()
+            self.ui.stop()
+            return
+
         saved_msg = None
         if not TRAIN_MODE:
             self.ui.set_overlay(f"Session Summary — {self.game_num} rounds", stats_table(self))
@@ -1031,6 +1068,13 @@ class BlackjackGame:
 
     def _rounds_completed(self) -> int:
         return self.game_num - 1 if self.phase == "betting" else self.game_num
+
+    def cash_out_balance(self, player: Player) -> float:
+        '''
+        What a player walks away with if play stops right now (e.g. Ctrl-C at the casino): bets placed
+        for a round that hasn't been dealt are returned; a hand already in play is forfeited.
+        '''
+        return max(0.0, float(self._settled_balance(player)))
 
     def refund_unplayed_bets(self) -> None:
         '''Quitting mid-betting: hand back bets for a round that will never be dealt.'''
@@ -1076,8 +1120,16 @@ class BlackjackGame:
             return
         name = parts[0].lower()
 
+        if self.plugin_mode:
+            if name in ("leave", "exit", "quit"):
+                self.refund_unplayed_bets()
+                raise LeaveTable()
+            if name in CASINO_DISABLED:
+                self.ui.error(f"/{name} isn't available at the casino.")
+                return
+
         if name == 'help':
-            self.ui.show_info("Commands", key_value_table(COMMANDS))
+            self.ui.show_info("Commands", key_value_table(PLUGIN_COMMANDS if self.plugin_mode else COMMANDS))
 
         elif name == 'exit':
             self.refund_unplayed_bets()
@@ -1540,6 +1592,49 @@ def make_ui(train_mode: bool, show_output: bool):
     if train_mode and not show_output:
         return HeadlessUI(verbose=False, progress=True)
     return RichUI()
+
+
+#== Terminal Casino ==#
+def play_as_plugin(player_name: str, balance: float) -> float:
+    '''
+    Run one visit to the table for Terminal Casino and return the player's balance when they leave.
+    Single seat, no bots; game rules come from this folder's game_settings.json. Never exits the
+    process, and always gives the terminal back.
+    '''
+    global PLUGIN_MODE, TRAIN_MODE, GOD_MODE, SHOW_GRAPH
+    with open(SETTINGS_FILE, 'r') as file:
+        settings = json.load(file)
+    apply_settings(settings)
+    PLUGIN_MODE, TRAIN_MODE, GOD_MODE, SHOW_GRAPH = True, False, False, False   # fresh state every visit
+
+    ui = make_ui(train_mode=False, show_output=True)
+    ui.animate = bool(settings.get("animate_cards", True))
+    game = None
+    try:
+        ui.start()
+        game = BlackjackGame(
+            num_decks=settings['num_decks'],
+            player_names=[player_name],
+            bot_info=[],
+            starting_balance=float(balance),
+            log_file=new_log_file(),
+            deal_delay=settings['deal_delay'],
+            allow_double_after_split=settings.get('allow_double_after_split', True),
+            split_limit=settings.get('split_limit', 1),
+            allow_insurance=settings.get('allow_insurance', True),
+            ui=ui,
+        )
+        game.play_game()
+        return max(0.0, float(game.players[0].balance))
+    except (KeyboardInterrupt, EOFError):
+        # Ctrl-C means "leave now": keep winnings so far instead of letting the casino roll back
+        if game is None:
+            return float(balance)
+        game.flush_log()
+        return game.cash_out_balance(game.players[0])
+    finally:
+        ui.stop()
+        PLUGIN_MODE = False
 
 
 #== Main ==#

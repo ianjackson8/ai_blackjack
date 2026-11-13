@@ -8,7 +8,7 @@ hits $0, last one standing wins. Plots balance over rounds and prints a stats ta
     python3 trial.py --repeat 200         # also run 200 more trials and count who wins
 
 Author: Ian Jackson
-Version v5.0
+Version v5.1
 '''
 
 import argparse

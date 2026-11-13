@@ -6,7 +6,7 @@ Two front-ends share one interface:
   HeadlessUI  - plain stdin/stdout fallback (tests, pipes, silent training)
 
 Author: Ian Jackson
-Version v5.0
+Version v5.1
 '''
 
 from __future__ import annotations
@@ -1139,8 +1139,8 @@ class RichUI(BaseUI):
         try:
             while True:
                 key = self._read()
-                if hotkeys and key in hotkeys:
-                    return hotkeys[key]
+                if hotkeys and key in hotkeys and not (key == "esc" and self._buffer):
+                    return hotkeys[key]        # an Esc hotkey only fires once the typed text is cleared
                 if key == "enter":
                     return self._buffer.strip() or default
                 if key == "backspace":
@@ -1233,6 +1233,11 @@ class RichUI(BaseUI):
         game = self.game
         if game is not None:
             total = game.num_decks * 52
+            if getattr(game, "plugin_mode", False) and game.players:
+                # at the casino the header carries the player's wallet, like the other tables
+                you = game.players[0]
+                info.append(f"{you.name}   ", "bold")
+                info.append(f"{money(you.balance)}   ", "bold green")
             info.append(f"Round {game.game_num}", "bold")
             info.append(f"   Shoe {len(game.shoe)}/{total}")
             info.append(f"   {game.num_decks} deck{'s' if game.num_decks != 1 else ''}")

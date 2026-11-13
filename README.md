@@ -55,7 +55,20 @@ python3 trial.py --seed 7         # a different trial
 python3 trial.py --repeat 200     # plus 200 more trials to see who wins most often
 ```
 
-## Game Settings
+## Terminal Casino
+This repo doubles as a [Terminal Casino](../terminal_casino) game: `plugin.py` is the adapter the casino loads.
+Add it to the casino as `plugins/ai_blackjack` (git submodule or a copy) and it appears in the lobby.
+
+At the casino the game runs in *plugin mode*:
+- one seat for the casino player, no bots
+- the casino's wallet is the bankroll; the game's `init_balance` isn't used
+- `Esc` (or `/leave`) at the bet prompt, or `L`/`Q`/`Esc` after a round, leaves the table and returns the balance; `?` shows the commands
+- money/persistence commands are off (`/editbalance`, `/godmode`, `/save`, `/load`, `/graph`), and there's no save prompt or graph on exit
+- `Ctrl-C` leaves too: bets for a round that hasn't been dealt are returned, a hand already in play is forfeited
+- rules still come from this folder's `game_settings.json`
+
+Running `python3 play_blackjack.py` directly is unchanged.
+
 Settings can be changed in-game: on the player name screen press `Tab` (or type `/settings`) to open the settings editor.
 Use `↑`/`↓` to move, `Enter` to edit or toggle, `A`/`R`/`X` to add, rename or remove bots, `S` to save to `game_settings.json`, and `Esc` to cancel.
 
@@ -120,6 +133,8 @@ The `ai-nn` bot uses deep Q-learning:
   - fix crash loading a save after bots were added in settings (#29)
   - fix bets placed this round being lost when saving or `/exit`-ing during betting (#31)
   - player names can no longer match a bot's name (#32)
+  - Terminal Casino support: `plugin.py` adapter and a plugin mode (single seat, leave-table key, no money-changing commands)
+  - all files (settings, models, saves, logs) are found relative to the game folder, so it can be launched from anywhere
 - v5.0
   - full-screen Rich TUI: card art, seat panels, key-driven prompts (`H`/`S`/`D`/`P`), session summary on exit
   - hit animation: cards slide in face down and flip; totals and log lines wait for the flip (`animate_cards` setting)
