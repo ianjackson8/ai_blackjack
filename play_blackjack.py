@@ -1021,23 +1021,40 @@ class BlackjackGame:
         global SHOW_GRAPH
         if SHOW_GRAPH: parse_log_and_plot(self.log_file, log=self.ui.print_after)
 
+    def _settled_balance(self, player: Player):
+        '''Balance with any bet placed this round still counted — while betting, the round hasn't been played.'''
+        return player.balance + (sum(player.hand_bets) if self.phase == "betting" else 0)
+
+    def _rounds_completed(self) -> int:
+        return self.game_num - 1 if self.phase == "betting" else self.game_num
+
+    def refund_unplayed_bets(self) -> None:
+        '''Quitting mid-betting: hand back bets for a round that will never be dealt.'''
+        if self.phase != "betting":
+            return
+        for player in self.seats:
+            player.balance = self._settled_balance(player)
+            player.current_bet, player.hand_bets = 0, []
+        self.game_num = self._rounds_completed()
+
     def save_game(self, save_name: str) -> str:
         save_name = save_name.strip().replace(".json", "")
         save_path = f"saves/{save_name}.json"
 
         save_data = {
             "saved_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-            "rounds_played": self.game_num,
-            "players": [{"name": p.name, "balance": p.balance} for p in self.players],
+            "rounds_played": self._rounds_completed(),
+            "players": [{"name": p.name, "balance": self._settled_balance(p)} for p in self.players],
             "bots": [],
             "balance_history": self.balance_history
         }
 
         for bot in self.bots:
             if isinstance(bot, TrainableBot):
-                bot_entry = {"name": bot.name, "strategy": "ai-nn", "balance": bot.balance, "epsilon": bot.epsilon}
+                bot_entry = {"name": bot.name, "strategy": "ai-nn", "balance": self._settled_balance(bot),
+                             "epsilon": bot.epsilon}
             else:
-                bot_entry = {"name": bot.name, "strategy": bot.strategy, "balance": bot.balance}
+                bot_entry = {"name": bot.name, "strategy": bot.strategy, "balance": self._settled_balance(bot)}
             save_data["bots"].append(bot_entry)
 
         with open(save_path, 'w') as f:
@@ -1058,6 +1075,7 @@ class BlackjackGame:
             self.ui.show_info("Commands", key_value_table(COMMANDS))
 
         elif name == 'exit':
+            self.refund_unplayed_bets()
             self.end_game()
             sys.exit(0)
 
