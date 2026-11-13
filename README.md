@@ -126,6 +126,7 @@ The `ai-nn` bot uses deep Q-learning:
   - add `trial.py`: bot survival trial with balance graph and stats table
   - redraw the screen only when something changes (was a full repaint 8×/s); faster startup
   - fix the shoe running out mid-round, bots looping on an unaffordable double, and `insurance_bet` not being initialised
+  - fix payouts: 21 after a split pays 1:1 (only a two-card 21 on an unsplit hand is a blackjack), blackjack vs dealer blackjack pushes, and a dealer blackjack beats a multi-card 21
 - v4.0
   - add insurance side-bet — offered to human players when dealer shows Ace; pays 2:1; toggleable via `allow_insurance` in settings
   - add `/stats` command — shows W/L/Push/BJ counts, net P&L, win rate, and best/worst round for all players; also printed automatically at end of session

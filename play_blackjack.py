@@ -629,7 +629,7 @@ class BlackjackGame:
 
             while True:
                 self.ui.set_active(player, hand_index)
-                if hand.is_blackjack():
+                if hand.is_blackjack() and len(player.hands) == 1:
                     self.ui.log(f"{name} has [bold gold1]Blackjack![/]")
                     self.ui.pause(self.deal_delay / 2)
                     break
@@ -748,6 +748,8 @@ class BlackjackGame:
                 self.ui.log(f"{name} insurance loses [red]-{money(player.insurance_bet)}[/]")
 
         dealer_value = self.dealer.hands[0].calculate_value()
+        dealer_blackjack = self.dealer.hands[0].is_blackjack()
+        split = len(player.hands) > 1
 
         for i, hand in enumerate(player.hands):
             bet = player.hand_bets[i] if player.hand_bets and i < len(player.hand_bets) else player.current_bet
@@ -756,12 +758,21 @@ class BlackjackGame:
                 self.ui.log(f"{name} {player_value} · [red]bust -{money(bet)}[/]")
                 player.results.append("busted")
                 player.stats["bust"] += 1
-            elif hand.is_blackjack():
+            elif hand.is_blackjack() and not split and dealer_blackjack:
+                player.balance += bet
+                self.ui.log(f"{name} blackjack vs dealer blackjack · [grey70]push[/]")
+                player.results.append("push")
+                player.stats["push"] += 1
+            elif hand.is_blackjack() and not split:   # a natural; 21 after a split is just 21
                 winnings = bet * 2.5
                 player.balance += winnings
                 self.ui.log(f"{name} {player_value} · [bold gold1]blackjack +{money(bet * 1.5)}[/]")
                 player.results.append("blackjack")
                 player.stats["blackjack"] += 1
+            elif dealer_blackjack:                      # dealer's natural beats any other 21
+                self.ui.log(f"{name} {player_value} · [red]lose -{money(bet)}[/] to dealer blackjack")
+                player.results.append("lose")
+                player.stats["lose"] += 1
             elif dealer_value > 21 or player_value > dealer_value:
                 winnings = bet * 2
                 player.balance += winnings
