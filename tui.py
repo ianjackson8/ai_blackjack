@@ -573,6 +573,9 @@ class BaseUI:
     def add_splash_name(self, name: str) -> None:
         pass
 
+    def set_splash_names(self, names) -> None:
+        pass
+
 
 class HeadlessUI(BaseUI):
     '''Plain-text fallback. Uses builtins.input so tests can patch it.'''
@@ -1083,6 +1086,10 @@ class RichUI(BaseUI):
 
     def add_splash_name(self, name: str) -> None:
         self._splash_names.append(name)
+        self.refresh()
+
+    def set_splash_names(self, names) -> None:
+        self._splash_names = list(names)
         self.refresh()
 
     # input

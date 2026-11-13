@@ -1471,6 +1471,10 @@ def open_settings(ui, settings: dict) -> None:
     ui.refresh()
 
 
+def bot_names(settings: Optional[dict]) -> set:
+    return {b.get("name", "").lower() for b in (settings or {}).get("bots", [])}
+
+
 def ask_player_names(ui, settings: Optional[dict] = None) -> List[str]:
     players = []
     if settings is not None:
@@ -1483,6 +1487,12 @@ def ask_player_names(ui, settings: Optional[dict] = None) -> List[str]:
                       hotkeys={"tab": "/settings"} if settings is not None else None).strip()
         if name.lower() == "/settings" and settings is not None:
             open_settings(ui, settings)
+            # a bot added or renamed in settings may now share a name with someone already seated
+            clashes = [p for p in players if p.lower() in bot_names(settings)]
+            if clashes:
+                players = [p for p in players if p not in clashes]
+                ui.set_splash_names(players)
+                ui.error(f"{', '.join(clashes)} now matches a bot's name — enter a different name.")
             continue
         if not name or name.lower() == "done":
             if players:
@@ -1490,6 +1500,8 @@ def ask_player_names(ui, settings: Optional[dict] = None) -> List[str]:
             ui.error("Must have at least one player.")
         elif name.lower() in (p.lower() for p in players):
             ui.error(f"'{name}' is already at the table.")
+        elif name.lower() in bot_names(settings):
+            ui.error(f"'{name}' is a bot's name — pick another (stats are kept by name).")
         else:
             players.append(name)
             ui.add_splash_name(name)
@@ -1554,6 +1566,12 @@ def main():
 
         if save_data:
             players = [p["name"] for p in save_data["players"]]
+            clashes = [p for p in players if p.lower() in bot_names(settings)]
+            if clashes:
+                ui.stop()
+                print(f"Can't load: player {', '.join(clashes)} has the same name as a bot in {SETTINGS_FILE}. "
+                      "Rename the bot in settings first.")
+                sys.exit(1)
         elif TRAIN_MODE:
             players = []
         else:
