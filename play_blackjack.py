@@ -1073,6 +1073,23 @@ class BlackjackGame:
     def _rounds_completed(self) -> int:
         return self.game_num - 1 if self.phase == "betting" else self.game_num
 
+    def rules(self) -> List[tuple]:
+        '''The table's rules as (rule, detail) rows, from the current settings.'''
+        decks = f"{self.num_decks} deck{'s' if self.num_decks != 1 else ''}"
+        splits = "no limit" if self.split_limit == -1 else f"up to {self.split_limit} time{'s' if self.split_limit != 1 else ''}"
+        return [
+            ("Goal", "Get closer to 21 than the dealer without going over"),
+            ("Shoe", f"{decks}, reshuffled near the end"),
+            ("Blackjack", "An Ace and a ten-card on your first two cards pays 3:2"),
+            ("Wins / pushes", "Other wins pay 1:1; a tie returns your bet"),
+            ("Dealer", "Stands on all 17s; with an Ace or ten showing, checks for blackjack first"),
+            ("Double", "On any first two cards" + ("; also after splitting" if self.allow_double_after_split
+                                                     else "; not after splitting")),
+            ("Split", f"Two cards of the same rank, {splits}. 21 after a split pays 1:1"),
+            ("Insurance", "Up to half your bet when the dealer shows an Ace; pays 2:1" if self.allow_insurance
+             else "Not offered"),
+        ]
+
     def cash_out_balance(self, player: Player) -> float:
         '''
         What a player walks away with if play stops right now (e.g. Ctrl-C at the casino): bets placed
@@ -1133,7 +1150,14 @@ class BlackjackGame:
                 return
 
         if name == 'help':
-            self.ui.show_info("Commands", key_value_table(PLUGIN_COMMANDS if self.plugin_mode else COMMANDS))
+            if self.plugin_mode:
+                from rich.console import Group
+                from rich.text import Text
+                self.ui.show_info("Rules & Commands", Group(
+                    Text("Table rules", "bold gold1"), key_value_table(self.rules()),
+                    Text(""), Text("Commands", "bold gold1"), key_value_table(PLUGIN_COMMANDS)))
+            else:
+                self.ui.show_info("Commands", key_value_table(COMMANDS))
 
         elif name == 'exit':
             self.refund_unplayed_bets()
