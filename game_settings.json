@@ -3,7 +3,7 @@
     "init_balance": 500,
     "default_bet": 10,
     "show_output": true,
-    "log_game": false,
+    "log_game": true,
     "show_graph": true,
     "deal_delay": 1.5,
     "animate_cards": true,

@@ -11,6 +11,7 @@ Version v5.0
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 import threading
@@ -298,34 +299,102 @@ def chip_line(bet, result: Optional[str], width: int) -> Text:
     return line
 
 
-# Side-view chip stacks: (body colour, edge-spot colour, label ink) per denomination
-STACK_COLOURS = {
-    1000: ("orange1", "grey93", "black"),
-    500:  ("purple4", "gold1", "white"),
-    100:  ("grey11", "grey93", "white"),
-    25:   ("green4", "grey93", "white"),
-    5:    ("red3", "grey93", "white"),
-    1:    ("grey85", "dodger_blue2", "black"),
-}
-STACK_GAP = "#06261c"   # thin dark line between chips
-STACK_MAX = 4           # chips drawn per stack; taller stacks get a "×n" tag
-CHIP_W = 5
+# Chip piles: the pile's height shows roughly how big a bet is and its colours hint at the
+# size (red for small bets ... orange for huge ones). It is a visual cue, not exact change.
+
+FELT = "#0b3d2e"
+PILE_CHIPS = [   # value, edge, face (lighter top), edge spot, shade (every other chip, so chips show as bands)
+    (1000, "#e0820f", "#ffab3d", "#fff3dc", "#b8680a"),
+    (500, "#6a32a0", "#8c55c4", "#f5c518", "#52267d"),
+    (100, "#2a2a2a", "#555555", "#e8e8e8", "#141414"),
+    (25, "#1d9145", "#33b85e", "#e8fff0", "#156b33"),
+    (5, "#cc2330", "#ee4652", "#ffe8ea", "#9e1823"),
+    (1, "#d4d4d4", "#f4f4f4", "#2b78e4", "#a8a8a8"),
+]
+PILE_DIM = ("#3d4a45", "#56635d", "#6c7a74", "#33403b")
+PILE_CHIP_W = 6        # chip width in columns
+PILE_ROWS = 6          # tallest pile, in text rows (two chips per row)
+PILE_MAX_CHIPS = 22
+SPOT_AT = (1, 4, 2, 3)   # one edge spot per chip, wandering around the stack
 
 
-def _one_stack(value: int, label: str, count: int, dim: bool) -> List[Text]:
-    body, spot, ink = STACK_COLOURS[value]
-    if dim:
-        body, spot, ink = "grey30", "grey42", "grey58"
-    rows = []
-    if count > STACK_MAX:
-        rows.append(Text(f"{'×' + str(count):^{CHIP_W}}", "grey50" if dim else "bold grey85"))
-    rows.append(Text(f"{label:^{CHIP_W}}", f"bold {ink} on {body}"))   # top chip face
-    for _ in range(min(count, STACK_MAX) - 1):                         # chip edges below it
-        edge = Text()
-        for j in range(CHIP_W):
-            edge.append("▆", f"{spot if j in (1, 3) else body} on {STACK_GAP}")
-        rows.append(edge)
-    return rows
+def pile_chip_count(bet) -> int:
+    '''Roughly logarithmic: $5 → 2 chips, $10 → 4, $25 → 7, $100 → 11, $500 → 16, $2K → 20.'''
+    bet = float(bet)
+    if bet <= 0:
+        return 0
+    return max(1, min(PILE_MAX_CHIPS, round(2 + 2.1 * math.log2(max(bet, 1) / 5))))
+
+
+def _pile_mix(bet, n: int) -> List[tuple]:
+    '''Mostly the biggest chip that fits the bet, with some of the next colour down on top.'''
+    i = next((k for k, c in enumerate(PILE_CHIPS) if c[0] <= float(bet)), len(PILE_CHIPS) - 1)
+    main, second = PILE_CHIPS[i], PILE_CHIPS[min(i + 1, len(PILE_CHIPS) - 1)]
+    k_main = n if n <= 2 else max(2, round(n * 0.65))
+    return [main] * k_main + [second] * (n - k_main)
+
+
+def _pile_stacks(mix: List[tuple]) -> List[List[tuple]]:
+    '''Spread chips into 1-3 stacks, the middle one tallest. Chips are dealt out bottom-up, so a
+    partly drawn pile (during an animation) grows evenly across its stacks.'''
+    n = len(mix)
+    k = 1 if n <= 6 else 2 if n <= 12 else 3
+    cycle = {1: [0], 2: [1, 0], 3: [1, 0, 1, 2]}[k]     # 3 stacks: the middle one gets half the chips
+    stacks: List[List[tuple]] = [[] for _ in range(k)]
+    for i, chip in enumerate(mix):
+        stacks[cycle[i % len(cycle)]].append(chip)
+    return stacks
+
+
+def pile(bet, shown: Optional[int] = None, dim: bool = False) -> List[Text]:
+    '''
+    Lines of a chip pile for a bet. `shown` draws only the first chips (for animations; the pile
+    keeps its final width so it doesn't jump around).
+    '''
+    n = pile_chip_count(bet)
+    if n == 0:
+        return [Text("")]
+    stacks = _pile_stacks(_pile_mix(bet, n))
+    visible = n if shown is None else max(0, min(n, shown))
+    # chips were dealt round the stacks in order, so the visible ones are the bottom of each stack
+    heights = [sum(1 for i in idxs if i < visible) for idxs in _pile_stacks(list(range(n)))]
+
+    rows = PILE_ROWS
+    h = rows * 2
+    w = len(stacks) * (PILE_CHIP_W + 1) - 1
+    px: List[List[Optional[str]]] = [[None] * w for _ in range(h)]
+    for si, stack in enumerate(stacks):
+        x0 = si * (PILE_CHIP_W + 1)
+        height = min(heights[si], h - 1)
+        for level in range(height):
+            _, edge, face, spot, shade = stack[level]
+            if dim:
+                edge, face, spot, shade = PILE_DIM
+            body = edge if level % 2 == 0 else shade
+            y = h - 1 - level
+            for j in range(PILE_CHIP_W):
+                px[y][x0 + j] = spot if j == SPOT_AT[level % len(SPOT_AT)] else body
+        if height:   # the top chip's face: a lighter, rounded-off line
+            face = PILE_DIM[1] if dim else stack[height - 1][2]
+            for j in range(1, PILE_CHIP_W - 1):
+                px[h - 1 - height][x0 + j] = face
+    tallest = min(h, max(len(st) for st in stacks) + 1)   # rows of the finished pile, kept while animating
+    top = (h - tallest) // 2 * 2
+    lines = []
+    for y in range(top, h, 2):
+        t = Text(no_wrap=True, overflow="crop")
+        for x in range(w):
+            up, lo = px[y][x], px[y + 1][x]
+            if up is None and lo is None:
+                t.append(" ")
+            elif lo is None:
+                t.append("▀", f"{up} on {FELT}")
+            elif up is None:
+                t.append("▄", f"{lo} on {FELT}")
+            else:
+                t.append("▀", f"{up} on {lo}")
+        lines.append(t)
+    return lines
 
 
 def hjoin(blocks: Sequence[List[Text]], gap: int = 1) -> Text:
@@ -346,25 +415,53 @@ def hjoin(blocks: Sequence[List[Text]], gap: int = 1) -> Text:
     return Text("\n").join(lines)
 
 
-def stack_blocks(amount, dim: bool = False) -> List[List[Text]]:
-    counts: dict = {}
-    for value, label, _ in chip_breakdown(amount):
-        counts.setdefault(value, [label, 0])[1] += 1
-    return [_one_stack(value, label, n, dim) for value, (label, n) in counts.items()]
+def _ease(p: float) -> float:
+    p = max(0.0, min(1.0, p))
+    return 1 - (1 - p) ** 3
 
 
-def chip_stacks(bet, result: Optional[str], width: int) -> Text:
-    '''Side-view chip stacks for a hand's bet, with the payout pushed alongside on a win.'''
-    lost = result in ("lose", "busted")
-    blocks = stack_blocks(bet, dim=lost)
-    label = Text(money(bet), "strike grey50" if lost else "bold")
+CHIP_BET_S = 0.45      # pile builds up
+CHIP_WIN_S = 0.6       # payout slides in and builds
+CHIP_LOSE_S = 0.7      # pile greys out, then chips come off the top
+CHIP_SLIDE_COLS = 10
+
+
+def chip_pile_view(bet, result: Optional[str], width: int, bet_from: int = 0,
+                   bet_age: Optional[float] = None, result_age: Optional[float] = None) -> Text:
+    '''
+    Chip pile for one hand's bet, plus what happened to it in the results phase.
+    bet_age / result_age: seconds since the bet was placed / the result came in (None = no animation).
+    '''
+    n = pile_chip_count(bet)
+    label = Text(money(bet), "bold")
     payout = {"win": bet, "blackjack": bet * 1.5}.get(result)
+
+    if result in ("lose", "busted"):
+        p = 1.0 if result_age is None else result_age / CHIP_LOSE_S
+        if p >= 1:
+            return Text.assemble((money(bet), "strike grey50"), ("  lost", "grey50"))
+        shown = n if p < 0.25 else round(n * (1 - _ease((p - 0.25) / 0.75)))
+        return hjoin([pile(bet, shown=shown, dim=True), [Text(money(bet), "strike grey50")]])
+
+    shown = None
+    if bet_age is not None and bet_age < CHIP_BET_S:
+        shown = round(bet_from + (n - bet_from) * _ease(bet_age / CHIP_BET_S))
+    blocks = [pile(bet, shown=shown)]
     if payout:
-        paid = stack_blocks(payout)
-        with_paid = blocks + [[Text("+", "grey62")]] + paid + [[label]]
-        if sum(max(t.cell_len for t in b) + 1 for b in with_paid) <= width:
-            return hjoin(with_paid)
-        label = Text.assemble((money(bet), "bold"), (f" +{money(payout)}", "bold green"))
+        p = 1.0 if result_age is None else min(1.0, result_age / CHIP_WIN_S)
+        e = _ease(p)
+        paid = pile(payout, shown=round(pile_chip_count(payout) * e))
+        win_label = Text.assemble((money(bet), "bold"), (f" +{money(payout)}", "bold green"))
+        settled = blocks + [[Text("+", "grey62")], paid, [win_label]]
+        room = width - sum(max(t.cell_len for t in b) + 1 for b in settled) + 1
+        if room < 0:
+            return hjoin(blocks + [[win_label]])
+        offset = min(room, round(CHIP_SLIDE_COLS * (1 - e)))     # payout slides in from the right
+        if offset:
+            settled.insert(2, [Text(" " * (offset - 1))]) if offset > 1 else None
+        return hjoin(settled)
+    if result == "push":
+        label.append("  push", "grey62")
     return hjoin(blocks + [[label]])
 
 
@@ -567,6 +664,16 @@ class _KeyReader:
             termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old)
             self._old = None
 
+    def ready(self) -> bool:
+        '''True if a keypress is waiting (so read() won't block).'''
+        if os.name == "nt":
+            import msvcrt
+            return msvcrt.kbhit()
+        if self._fd is None:
+            return False
+        import select
+        return bool(select.select([self._fd], [], [], 0)[0])
+
     def read(self) -> str:
         if os.name == "nt":
             import msvcrt
@@ -606,9 +713,10 @@ class _KeyReader:
 class _LogView:
     '''Shows the newest log lines that fit in the region it is given.'''
 
-    def __init__(self, lines: List[str], title: str):
+    def __init__(self, lines: List[str], title: str, subtitle: str = ""):
         self.lines = lines
         self.title = title
+        self.subtitle = subtitle
 
     def __rich_console__(self, console, options):
         height = options.height or console.height
@@ -624,7 +732,203 @@ class _LogView:
             budget -= used
         picked.reverse()
         yield Panel(Group(*picked) if picked else Text("…", "dim"), title=self.title,
-                    title_align="left", border_style="grey42", height=height, box=box.ROUNDED)
+                    title_align="left", subtitle=self.subtitle or None, subtitle_align="right",
+                    border_style="grey42", height=height, box=box.ROUNDED)
+
+
+#== Side panel: session scoreboard and bot brains ==#
+
+SPARK = "▁▂▃▄▅▆▇█"
+MEDALS = {1: ("1st", "bold gold1"), 2: ("2nd", "bold grey85"), 3: ("3rd", "bold dark_orange3")}
+ACTION_STYLE = {"hit": "bold cyan", "stand": "bold green", "double": "bold gold1", "split": "bold magenta"}
+
+
+def sparkline(values: Sequence[float], width: int) -> Text:
+    '''Tiny balance chart: the last `width` values, green above the first value, red below.'''
+    if not values:
+        return Text("")
+    start = values[0]
+    pts = list(values[-width:])
+    lo, hi = min(pts + [start]), max(pts + [start])
+    span = (hi - lo) or 1
+    line = Text()
+    for v in pts:
+        line.append(SPARK[min(len(SPARK) - 1, int((v - lo) / span * (len(SPARK) - 1) + 0.5))],
+                    "green" if v >= start else "red")
+    return line
+
+
+def _streak(history: Sequence[float]) -> str:
+    '''Current run of winning or losing rounds, e.g. "W3".'''
+    run, sign = 0, 0
+    for a, b in zip(reversed(history[:-1]), reversed(history[1:])):
+        d = (b > a) - (b < a)
+        if d == 0:
+            break
+        if sign and d != sign:
+            break
+        sign, run = d, run + 1
+    return f"{'W' if sign > 0 else 'L'}{run}" if run >= 2 else ""
+
+
+def scoreboard(game, width: int) -> Group:
+    seats = game.players + game.bots
+    start = getattr(game, "starting_balance", 0)
+    rows = []
+    for p in seats:
+        hist = game.balance_history.get(p.name) or [p.balance]
+        net = p.balance - hist[0] - getattr(p, "rebuys", 0) * start
+        rows.append((p, hist, net))
+    rows.sort(key=lambda r: -r[2])
+
+    lines: List[Text] = []
+    best = None   # biggest single-round win this session
+    for p, hist, _ in rows:
+        for i in range(1, len(hist)):
+            d = hist[i] - hist[i - 1]
+            if d > 0 and (best is None or d > best[0]):
+                best = (d, p.name, i)
+    for place, (p, hist, net) in enumerate(rows, 1):
+        medal, medal_style = MEDALS.get(place, (f"{place}th", "grey62"))
+        s = p.stats
+        played = sum(s.values())
+        head = Text()
+        head.append(f"{medal} ", medal_style)
+        name_w = max(4, width - 4 - 9 - 9)
+        head.append(f"{p.name[:name_w]:<{name_w}}", "bold")
+        head.append(f"{money(p.balance):>9}", "bold green" if p.balance > 0 else "bold red")
+        head.append(f"{signed_money(net) if net else 'even':>9}", "green" if net > 0 else ("red" if net < 0 else "grey62"))
+        lines.append(head)
+
+        detail = Text("    ")
+        spark_w = max(6, min(18, width - 22))
+        detail.append_text(sparkline(hist, spark_w))
+        detail.append(" " * max(1, spark_w - min(len(hist), spark_w) + 1))
+        if played:
+            detail.append(f"{(s['win'] + s['blackjack']) / played * 100:.0f}% W", "grey70")
+        streak = _streak(hist)
+        if streak:
+            detail.append(f" · {streak}", "green" if streak[0] == "W" else "red")
+        if getattr(p, "rebuys", 0):
+            detail.append(f" · rebuy×{p.rebuys}", "magenta")
+        lines.append(detail)
+
+    if best:
+        lines.append(Text.assemble(("Biggest win ", "grey62"), (signed_money(best[0]), "bold green"),
+                                   (f" {best[1]} (round {best[2]})", "grey62")))
+    return Group(*lines)
+
+
+def _q_bar(value: float, half: int = 5, scale: float = 1.0) -> Text:
+    '''Diverging bar around zero: red to the left for negative, green to the right for positive.'''
+    cells = min(half, round(abs(value) / scale * half))
+    left = " " * (half - cells) + "█" * cells if value < 0 else " " * half
+    right = "█" * cells + " " * (half - cells) if value > 0 else " " * half
+    return Text.assemble((left, "red"), ("│", "grey50"), (right, "green"))
+
+
+def _play_line(play: dict) -> Text:
+    up = RANK_SHORT.get(play["up"], play["up"])
+    return Text.assemble((f"{play['hand']} vs {up}", "white"), (" → ", "grey50"),
+                         (play["action"].capitalize(), ACTION_STYLE.get(play["action"], "bold")))
+
+
+def _brain_nn(p) -> List[Text]:
+    lines = []
+    bet = p.brain.get("bet")
+    if bet and bet.get("all_in"):
+        lines.append(Text(f"Bet: all in, {money(bet['bet'])}", "grey70"))
+    elif bet:
+        lines.append(Text.assemble(("Bet: ", "grey62"), (f"count {bet['tc']:+.1f}, {bet['dealt'] * 100:.0f}% dealt → ", "grey70"),
+                                   (f"{bet['mults'][bet['choice']]}× ({money(bet['bet'])})", "bold"),
+                                   (" explore" if bet["explored"] else "", "magenta")))
+        q = Text("  ")
+        best = max((v for v, ok in zip(bet["q"], bet["valid"]) if ok), default=None)
+        for m, v, ok in zip(bet["mults"], bet["q"], bet["valid"]):
+            style = "grey35" if not ok else ("bold green" if v == best else "grey62")
+            q.append(f"{m}×{v:+.2f} ", style)
+        lines.append(q)
+    plays = p.brain.get("plays", [])
+    for play in plays[:-1]:
+        lines.append(Text("  ") + _play_line(play))
+    if plays:
+        last = plays[-1]
+        line = _play_line(last)
+        if last["explored"]:
+            line.append(f"  random (ε {last['epsilon']:.2f})", "magenta")
+        lines.append(line)
+        for action, value in last["q"].items():
+            if not last["valid"][action]:
+                lines.append(Text(f"  {action.capitalize():<7}   —  can't", "grey35"))
+                continue
+            chosen = action == last["action"]
+            row = Text(f"  {action.capitalize():<7}", "bold" if chosen else "grey70")
+            row.append_text(_q_bar(value))
+            row.append(f" {value:+.2f}", "bold" if chosen else "grey62")
+            if chosen:
+                row.append(" ◀", "gold1")
+            lines.append(row)
+    return lines
+
+
+def _brain_counter(p) -> List[Text]:
+    lines = []
+    bet = p.brain.get("bet")
+    tracker, kind = p.tracker, p.tracker_kind
+    if kind != "flat":
+        # live read of the shoe (matches the seat panel); the bet line below is what it bet on
+        tc, edge = tracker.true_count(), tracker.edge()
+        count = Text.assemble(("LSTM " if kind == "lstm" else "Hi-Lo " if kind == "hi-lo" else "Exact ", "grey62"),
+                              (f"TC {tc:+.1f}", "bold"))
+        if kind == "lstm":
+            count.append(f" (real {tracker.exact_true_count():+.1f})", "grey62")
+        count.append(" · edge ", "grey62")
+        count.append(f"{edge * 100:+.2f}%", "green" if edge > 0 else "red")
+        lines.append(count)
+        share = tracker.share if kind == "lstm" else tracker._exact_share()
+        hi = float(share[8:].sum()) * 100
+        lines.append(Text.assemble(("Tens+aces left ", "grey62"), (f"{hi:.1f}%", "green" if hi > 38.5 else "red"),
+                                   (" (fresh 38.5%)", "grey50")))
+    if bet and kind != "flat":
+        ramp = Text("Bet ", "grey62")
+        ramp.append("■" * bet["units"], "gold1").append("□" * (bet["max"] - bet["units"]), "grey35")
+        ramp.append(f" {bet['units']}/{bet['max']} units · {money(bet['bet'])}", "grey70")
+        lines.append(ramp)
+    elif kind == "flat":
+        lines.append(Text("Flat betting (no count)", "grey62"))
+    for play in p.brain.get("plays", []):
+        lines.append(Text("  ") + _play_line(play) + Text("  basic strategy", "grey50"))
+    return lines
+
+
+def bot_brains(game) -> List[Text]:
+    blocks = []
+    for p in game.bots:
+        kind = "ai-nn" if hasattr(p, "q_network") else getattr(p, "strategy", "")
+        head = Text.assemble((p.name, "bold cyan"), (f"  {kind}", "grey50"))
+        if hasattr(p, "q_network"):
+            body = _brain_nn(p)
+        elif hasattr(p, "tracker"):
+            body = _brain_counter(p)
+        else:
+            body = [Text("  ") + _play_line(play) + Text(f"  {play['why']}", "grey50")
+                    for play in p.brain.get("plays", [])]
+        if not body:
+            body = [Text("waiting…", "grey50 italic")]
+        if blocks:
+            blocks.append(Text(""))
+        blocks.append(head)
+        blocks.extend(body)
+    if not blocks:
+        blocks = [Text("No bots at the table.", "grey50 italic")]
+    return blocks
+
+
+SIDE_VIEWS = ("board", "log")
+
+
+def side_log_hint(width: int) -> bool:
+    return width >= 100   # the side column (and so the scoreboard) only exists on wide screens
 
 
 class RichUI(BaseUI):
@@ -649,7 +953,11 @@ class RichUI(BaseUI):
         self.animate = True                      # hit animation on/off (settings: animate_cards)
         self._births = weakref.WeakKeyDictionary()  # card -> time it first appeared mid-hand
         self._anim_until = 0.0
+        self._chips_seen: dict = {}              # (player id, hand) -> bet/result animation state
+        self._chip_anim_until = 0.0              # chip animations don't hold the game up
         self._held_log: deque = deque()          # log lines held back until the card flips
+        self.side_view = "board"                 # right-hand panel: "board" (scores + brains) or "log"
+        self._pending_keys: deque = deque()      # keys typed while the bots were playing
         self._dirty = threading.Event()          # set by refresh(); the draw thread repaints once per burst
         self._drawer: Optional[threading.Thread] = None
         self._running = False
@@ -689,11 +997,14 @@ class RichUI(BaseUI):
     def _draw_loop(self) -> None:
         size = self.console.size
         while self._running:
-            self._dirty.wait(timeout=0.25)        # wake up now and then to notice terminal resizes
+            # wake up now and then to notice terminal resizes; keep drawing while chips/cards animate
+            busy = time.monotonic() < max(self._anim_until, self._chip_anim_until)
+            self._dirty.wait(timeout=1 / ANIM_FPS if busy else 0.25)
             if not self._running:
                 break
             new_size = self.console.size
-            if not self._dirty.is_set() and new_size == size:
+            animating = time.monotonic() < max(self._anim_until, self._chip_anim_until)
+            if not self._dirty.is_set() and new_size == size and not animating:
                 continue
             size = new_size
             self._dirty.clear()
@@ -726,11 +1037,10 @@ class RichUI(BaseUI):
         self.refresh()
         end = max(end, self._anim_until)   # always let a hit animation finish
         while (now := time.monotonic()) < end:
-            if now < self._anim_until:
-                time.sleep(min(1 / ANIM_FPS, end - now))
-            else:
-                time.sleep(end - now)
+            self._poll_keys()
+            time.sleep(min(1 / ANIM_FPS if now < self._anim_until else 0.05, end - now))
             self.refresh()
+        self._poll_keys()
 
     # hit animation
     def _register_new_cards(self) -> None:
@@ -777,9 +1087,26 @@ class RichUI(BaseUI):
 
     # input
     def _read(self) -> str:
-        key = self._keys.read()
-        self._flash = None
-        return key
+        while True:
+            key = self._pending_keys.popleft() if self._pending_keys else self._keys.read()
+            self._flash = None
+            if key == "tab" and self.game is not None:   # Tab flips the side panel during a game
+                self._cycle_side()
+                continue
+            return key
+
+    def _cycle_side(self) -> None:
+        self.side_view = SIDE_VIEWS[(SIDE_VIEWS.index(self.side_view) + 1) % len(SIDE_VIEWS)]
+        self.refresh()
+
+    def _poll_keys(self) -> None:
+        '''While bots play: handle Tab right away and keep other keys for the next prompt.'''
+        while self._live and self._keys.ready():
+            key = self._keys.read()
+            if key == "tab" and self.game is not None:
+                self._cycle_side()
+            elif key:
+                self._pending_keys.append(key)
 
     def choose(self, prompt: str, options: Sequence[Option], default: Optional[str] = None) -> str:
         self._prompt, self._options, self._default, self._buffer = prompt, options, default, None
@@ -844,7 +1171,9 @@ class RichUI(BaseUI):
             Layout(self._footer(), name="footer", size=4),
         )
         body = layout["body"]
-        log_view = _LogView(list(self._log), "Table Talk")
+        log_view = _LogView(list(self._log), "Table Talk",
+                            "[grey50]Tab: scores[/]" if self.game is not None and side_log_hint(width) else "")
+        side_w = 46 if width >= 150 else 42
 
         if self._overlay is not None:
             body_view = self._overlay if getattr(self._overlay, "fill", False) else Align.center(self._overlay, vertical="middle")
@@ -853,15 +1182,38 @@ class RichUI(BaseUI):
         elif self.game is None:
             main = self._splash()
         else:
-            main_w = width - (42 if side_log else 0)
+            main_w = width - (side_w if side_log else 0)
             main = self._table(main_w, height - 7 - (0 if side_log or self._inline_log else 7))
 
         if side_log:
-            body.split_row(Layout(main, name="main"), Layout(log_view, name="log", size=42))
+            side = log_view
+            if self.side_view == "board" and self.game is not None and self._overlay is None:
+                side = self._board(side_w, height - 7)
+            body.split_row(Layout(main, name="main"), Layout(side, name="log", size=side_w))
         elif self._inline_log:
             body.update(main)
         else:
             body.split_column(Layout(main, name="main"), Layout(log_view, name="log", size=7))
+        return layout
+
+    def _board(self, width: int, height: int):
+        game = self.game
+        inner = width - 4
+        board = scoreboard(game, inner)
+        n_lines = 2 * len(game.players + game.bots) + 1
+        board_h = min(n_lines + 2, max(6, height // 2))
+        brains = bot_brains(game)
+        brains_h = sum(max(1, len(t.wrap(self.console, inner))) for t in brains) + 2
+        parts = [Layout(Panel(board, title="[bold gold1]Scoreboard[/]", subtitle="[grey50]Tab: log[/]",
+                              subtitle_align="right", border_style="grey42", box=box.ROUNDED), size=board_h)]
+        brains_panel = Panel(Group(*brains), title="[bold cyan]Bot Brains[/]", border_style="grey42", box=box.ROUNDED)
+        if height - board_h - brains_h >= 6:    # room left over: recent table talk underneath
+            parts.append(Layout(brains_panel, size=brains_h))
+            parts.append(Layout(_LogView(list(self._log), "Table Talk")))
+        else:
+            parts.append(Layout(brains_panel))
+        layout = Layout()
+        layout.split_column(*parts)
         return layout
 
     def _header(self):
@@ -913,7 +1265,8 @@ class RichUI(BaseUI):
         if not lines:
             lines.append(Text(""))
         return Panel(Group(*lines[-2:]), box=box.ROUNDED, border_style="grey42",
-                     subtitle="[grey50]Ctrl-C quits[/]", subtitle_align="right")
+                     subtitle="[grey50]Tab: scores / log · Ctrl-C quits[/]" if self.game is not None
+                     else "[grey50]Ctrl-C quits[/]", subtitle_align="right")
 
     def _splash(self):
         from types import SimpleNamespace
@@ -943,8 +1296,8 @@ class RichUI(BaseUI):
         max_hands = max((len(p.hands) for p in seats), default=1)
         need = 9 + rows * (4 + 7 * max_hands)
         compact = height < need
-        # side-view chip stacks need up to STACK_MAX + 1 rows per hand instead of one
-        stacks = height >= 9 + rows * (4 + (6 + STACK_MAX + 1) * max_hands)
+        # chip piles need up to PILE_ROWS rows per hand instead of one
+        stacks = height >= 9 + rows * (4 + (6 + PILE_ROWS) * max_hands)
         col_w = (width - 4) // cols
         inner_w = col_w - 4
 
@@ -988,13 +1341,34 @@ class RichUI(BaseUI):
                      subtitle="[grey62]stands on 17[/]", border_style="gold1" if active else "grey50",
                      box=box.ROUNDED, style="on #0b3d2e")
 
-    @staticmethod
-    def _chips(bet, result, width: int, stacks: bool):
-        if stacks:
-            drawn = chip_stacks(bet, result, width)
-            if max(line.cell_len for line in drawn.split()) <= width:
-                return drawn
+    def _chips(self, player, hand_index: int, bet, result, width: int, stacks: bool):
+        if not stacks:
+            return chip_line(bet, result, width)
+        bet_age, result_age, bet_from = self._chip_ages(player, hand_index, bet, result)
+        drawn = chip_pile_view(bet, result, width, bet_from=bet_from, bet_age=bet_age, result_age=result_age)
+        if max(line.cell_len for line in drawn.split()) <= width:
+            return drawn
         return chip_line(bet, result, width)
+
+    def _chip_ages(self, player, hand_index: int, bet, result):
+        '''Track when a hand's bet / result first appeared, to animate the chips.'''
+        if not self.animate:
+            return None, None, 0
+        key = (id(player), hand_index)
+        now = time.monotonic()
+        st = self._chips_seen.get(key)
+        if st is None or st["result"] is not None and result is None or bet != st["bet"] and result is None:
+            grow_from = pile_chip_count(st["bet"]) if st and st["result"] is None and bet > st["bet"] else 0
+            st = self._chips_seen[key] = {"bet": bet, "from": grow_from, "t": now, "result": None, "rt": None}
+            self._chip_anim_until = max(self._chip_anim_until, now + CHIP_BET_S)
+        if result is not None and st["result"] != result:
+            st["result"], st["rt"] = result, now
+            self._chip_anim_until = max(self._chip_anim_until, now + max(CHIP_WIN_S, CHIP_LOSE_S))
+        bet_age = now - st["t"]
+        result_age = now - st["rt"] if st["rt"] is not None else None
+        return (bet_age if bet_age < CHIP_BET_S else None,
+                result_age if result_age is not None and result_age < max(CHIP_WIN_S, CHIP_LOSE_S) else None,
+                st["from"])
 
     def _seat_panel(self, player, inner_w: int, compact: bool, stacks: bool = False):
         game = self.game
@@ -1028,7 +1402,7 @@ class RichUI(BaseUI):
             parts.append(Text("sitting out", "grey50 italic"))
         elif not player.hands or not player.hands[0].cards:
             if player.current_bet:
-                parts.append(self._chips(player.current_bet, None, inner_w, stacks))
+                parts.append(self._chips(player, 0, player.current_bet, None, inner_w, stacks))
             else:
                 parts.append(Text("placing bet…" if is_active else "", "grey62 italic"))
         else:
@@ -1046,7 +1420,7 @@ class RichUI(BaseUI):
                     status.append(" + ?", "grey62")
                     parts.append(status)
                     bet = player.hand_bets[i] if i < len(player.hand_bets) else player.current_bet
-                    parts.append(Padding(self._chips(bet, None, inner_w - 2, stacks), (0, 0, 0, 2)))
+                    parts.append(Padding(self._chips(player, i, bet, None, inner_w - 2, stacks), (0, 0, 0, 2)))
                     continue
                 status.append(hand_label(hand), "bold")
                 bet = player.hand_bets[i] if i < len(player.hand_bets) else player.current_bet
@@ -1060,7 +1434,7 @@ class RichUI(BaseUI):
                 elif hand.is_busted():
                     status.append("  ").append_text(badge("busted"))
                 parts.append(status)
-                parts.append(Padding(self._chips(bet, result, inner_w - 2, stacks), (0, 0, 0, 2)))
+                parts.append(Padding(self._chips(player, i, bet, result, inner_w - 2, stacks), (0, 0, 0, 2)))
 
         border = "bold gold1" if is_active else ("grey35" if sitting_out else ("cyan" if strategy else "green3"))
         return Panel(Group(*parts), title=title, title_align="left", subtitle=subtitle, subtitle_align="right",

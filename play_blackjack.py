@@ -186,6 +186,8 @@ class Player:
         self.last_bet = 0
         self.round_start_balance = balance
         self.stats = {"win": 0, "lose": 0, "push": 0, "bust": 0, "blackjack": 0}
+        # what a bot was thinking this round, for the UI's "Bot Brains" panel
+        self.brain = {"bet": None, "plays": []}
 
     def log_action(self, action: str, dealer_visible_card: str):
         self.actions.append({
@@ -241,6 +243,7 @@ class Player:
 
     def reset_for_new_round(self):
         self.round_start_balance = self.balance
+        self.brain = {"bet": None, "plays": []}
         self.hands = [Hand()]
         self.current_bet = 0
         self.hand_bets = []
@@ -266,6 +269,9 @@ class Bot(Player):
             ui.pause(deal_delay / 2)
             while not hand.is_blackjack() and not hand.is_busted():
                 action = self.make_decision(dealer_visible_card, hand)
+                self.brain["plays"].append({
+                    "hand": hand_label(hand), "up": dealer_visible_card.split(" ")[0], "action": action,
+                    "why": "hits 16 or less" if self.strategy == "default" else "book table"})
 
                 if action == "hit":
                     card = shoe.draw_card()
@@ -413,7 +419,15 @@ class CounterBot(Bot):
         self._sync(shoe)
         self.last_edge = self.tracker.edge()
         units = 1 if self.tracker_kind == "flat" else bet_units(self.last_edge, self.max_spread)
-        return min(units * base_bet, self.balance)
+        bet = min(units * base_bet, self.balance)
+        share = self.tracker.share if self.tracker_kind == "lstm" else self.tracker._exact_share()
+        self.brain["bet"] = {
+            "kind": "counter", "tracker": self.tracker_kind, "tc": self.tracker.true_count(),
+            "real_tc": self.tracker.exact_true_count() if self.tracker_kind == "lstm" else None,
+            "edge": self.last_edge, "units": units, "max": self.max_spread, "bet": bet,
+            "high_share": float(share[8:].sum()),     # tens + aces still in the shoe
+        }
+        return bet
 
     def observe(self, ranks: List[str], shoe: Shoe) -> None:
         '''Called after each round with every card that was shown.'''
@@ -449,6 +463,8 @@ class CounterBot(Bot):
                 can_split = (two and hand.cards[0].rank == hand.cards[1].rank and self.balance >= self.current_bet
                              and (self.split_limit == -1 or len(self.hands) <= self.split_limit))
                 action = basic_strategy([c.rank for c in hand.cards], up, can_double, can_split, self.das)
+                self.brain["plays"].append({"hand": hand_label(hand), "up": up, "action": action,
+                                            "why": "basic strategy"})
 
                 if action == "split":
                     rank = hand.cards[0].rank
@@ -1167,24 +1183,33 @@ class TrainableBot(Player):
     # ── decisions ────────────────────────────────────────────────────────────
     def choose_action(self, state: np.ndarray) -> int:
         valid = [True, True, bool(state[2])]
-        if random.random() < self.epsilon:
-            return random.choice([i for i, ok in enumerate(valid) if ok])
         with torch.no_grad():
-            return _masked_argmax(self.q_network(torch.from_numpy(state)), valid)
+            q = self.q_network(torch.from_numpy(state))
+        self.last_q, self.last_valid = q.tolist(), valid
+        self.last_explored = random.random() < self.epsilon
+        if self.last_explored:
+            return random.choice([i for i, ok in enumerate(valid) if ok])
+        return _masked_argmax(q, valid)
 
     def choose_bet(self, shoe: Shoe, base_bet) -> float:
         '''Pick a bet size from the count. Falls back to whatever is left if below one unit.'''
         self.bet_state = self.bet_action = None
         if self.balance < base_bet:
+            self.brain["bet"] = {"kind": "nn", "all_in": True, "bet": self.balance}
             return self.balance
         valid = [m * base_bet <= self.balance for m in BET_MULTIPLIERS]
         state = self.get_bet_state(shoe)
-        if random.random() < self.epsilon:
+        with torch.no_grad():
+            q = self.bet_network(torch.from_numpy(state))
+        explored = random.random() < self.epsilon
+        if explored:
             idx = random.choice([i for i, ok in enumerate(valid) if ok])
         else:
-            with torch.no_grad():
-                idx = _masked_argmax(self.bet_network(torch.from_numpy(state)), valid)
+            idx = _masked_argmax(q, valid)
         self.bet_state, self.bet_action = state, idx
+        self.brain["bet"] = {"kind": "nn", "tc": shoe.true_count(), "dealt": shoe.penetration(),
+                             "q": q.tolist(), "valid": valid, "choice": idx, "explored": explored,
+                             "mults": BET_MULTIPLIERS, "bet": BET_MULTIPLIERS[idx] * base_bet}
         return BET_MULTIPLIERS[idx] * base_bet
 
     # ── play ─────────────────────────────────────────────────────────────────
@@ -1201,9 +1226,14 @@ class TrainableBot(Player):
             stake = self.hand_bets[0] if self.hand_bets else self.current_bet
             can_double = hand.num_cards() == 2 and self.balance >= stake
             state = self.get_state(hand, dealer_visible_card, can_double)
+            label = hand_label(hand)
             idx = self.choose_action(state)
             self.trajectory.append((state, idx))
             action = PLAY_ACTIONS[idx]
+            self.brain["plays"].append({"hand": label, "up": dealer_visible_card.split(" ")[0], "action": action,
+                                        "q": dict(zip(PLAY_ACTIONS, self.last_q)),
+                                        "valid": dict(zip(PLAY_ACTIONS, self.last_valid)),
+                                        "explored": self.last_explored, "epsilon": self.epsilon})
             tag = f"  [grey50]ε {self.epsilon:.3f}[/]"
 
             if action == "hit":

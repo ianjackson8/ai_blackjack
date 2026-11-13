@@ -6,7 +6,11 @@ python3 play_blackjack.py
 ```
 
 ### Controls
-The game runs as a full-screen terminal UI with card art, casino chip stacks for every bet (white $1, red $5, green $25, black $100, purple $500, orange $1K), a live table, and a "Table Talk" log of every action.
+The game runs as a full-screen terminal UI with card art, a pile of casino chips for every bet (the bigger the bet, the bigger the pile; colours run red → green → black → purple → orange as bets grow) that animates as bets go in, winnings get paid and losing bets get swept away, a live table, and a side panel (on terminals 100+ columns wide) with:
+
+- **Scoreboard** — seats ranked by net result, balance sparkline, win %, current streak, biggest win of the session
+- **Bot Brains** — why each bot did what it did: the NN bot's Q-values for its bet and each hit/stand/double (and when it explored at random), Count Bot's live count, LSTM vs. real true count, tens+aces left and bet ramp, and the book/basic-strategy play for rule bots
+- **Table Talk** — the log of every action, under the brains when there's room; `Tab` switches to a full-height log and back
 
 | Key | Action |
 | --- | --- |
@@ -16,6 +20,7 @@ The game runs as a full-screen terminal UI with card art, casino chip stacks for
 | `P` / `4` | Split (only shown when allowed) |
 | `Enter` | Accept the default: repeat your last bet, deal the next round |
 | `Esc` | Clear the text you're typing |
+| `Tab` | Switch the side panel between scoreboard/brains and the full log (works while bots play) |
 | `Ctrl-C` | Quit immediately |
 
 At the bet prompt, type an amount (`0` to sit out a round) or a `/command`.
