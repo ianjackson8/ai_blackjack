@@ -47,6 +47,7 @@ SETTINGS_FIELDS = [
     {"key": "init_balance", "label": "Starting balance", "kind": "money", "min": 1, "desc": "New players and bots start with this"},
     {"key": "default_bet", "label": "Default bet", "kind": "money", "min": 1, "desc": "Bots always bet this; your first suggested bet"},
     {"key": "deal_delay", "label": "Deal delay", "kind": "seconds", "min": 0, "desc": "Pause between cards (0 = instant)"},
+    {"key": "animate_cards", "label": "Hit animation", "kind": "bool", "desc": "Hit cards slide in face down, then flip"},
     {"key": "allow_insurance", "label": "Insurance", "kind": "bool", "desc": "Offer insurance when the dealer shows an Ace"},
     {"key": "allow_double_after_split", "label": "Double after split", "kind": "bool", "desc": "Allow doubling down on split hands"},
     {"key": "split_limit", "label": "Split limit", "kind": "split_limit", "min": -1, "desc": "Max splits per hand (-1 = unlimited)"},
@@ -1507,6 +1508,7 @@ def main():
         else:
             log_file = 'logs/session_NULL.json'
 
+        ui.animate = bool(settings.get("animate_cards", True)) and not TRAIN_MODE
         bj_game = BlackjackGame(
             num_decks=settings['num_decks'],
             player_names=players,

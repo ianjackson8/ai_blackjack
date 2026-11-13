@@ -14,7 +14,9 @@ from __future__ import annotations
 import os
 import sys
 import time
+import weakref
 from collections import deque
+from types import SimpleNamespace
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 from rich import box
@@ -43,6 +45,14 @@ BACK_FILL = "blue on dark_blue"
 
 CARD_W = 7   # full card width
 SLIVER_W = 3  # visible width of an overlapped card
+
+# Hit animation: the card slides in face down, then flips face up
+SLIDE_S = 0.35           # seconds sliding in
+FLIP_S = 0.30            # seconds flipping
+ANIM_S = SLIDE_S + FLIP_S
+SLIDE_COLS = 12          # how far to the right the card starts
+FLIP_WIDTHS = (5, 3, 1, 3, 5)   # card width through the flip (edge-on in the middle)
+ANIM_FPS = 30
 
 RESULT_BADGES = {
     "blackjack": (" BLACKJACK ", "bold black on gold1"),
@@ -140,6 +150,39 @@ def _card_rows(card, hidden: bool, sliver: bool) -> List[Text]:
     ]
 
 
+def _narrow_rows(card, hidden: bool, w: int) -> List[Text]:
+    '''A card squeezed to width w (mid-flip). w == 1 is the card seen edge-on.'''
+    border = BACK_BORDER if hidden else BORDER_STYLE
+    if w <= 1:
+        return [Text("│", border)] * 5
+    inner = w - 2
+    top, bottom = Text("╭" + "─" * inner + "╮", border), Text("╰" + "─" * inner + "╯", border)
+    if hidden:
+        mid = [Text.assemble(("│", border), ("▒" * inner, BACK_FILL), ("│", border))] * 3
+        return [top] + mid + [bottom]
+    ink = RED_STYLE if card.suit in RED_SUITS else BLACK_STYLE
+    rank, suit = short_rank(card), SUIT_SYMBOLS[card.suit]
+    if inner >= 3:
+        cells = [(f"{rank:<{inner}}", ink), (suit.center(inner), ink), (f"{rank:>{inner}}", ink)]
+    else:
+        cells = [(" " * inner, CARD_BG), (suit.center(inner), ink), (" " * inner, CARD_BG)]
+    mid = [Text.assemble(("│", border), cell, ("│", border)) for cell in cells]
+    return [top] + mid + [bottom]
+
+
+def _animated_rows(card, age: float) -> Tuple[List[Text], int]:
+    '''Frame of the hit animation at `age` seconds: (card rows, extra left offset).'''
+    if age < SLIDE_S:
+        p = age / SLIDE_S
+        eased = 1 - (1 - p) ** 3
+        return _card_rows(card, hidden=True, sliver=False), round(SLIDE_COLS * (1 - eased))
+    step = min(len(FLIP_WIDTHS) - 1, int((age - SLIDE_S) / FLIP_S * len(FLIP_WIDTHS)))
+    w = FLIP_WIDTHS[step]
+    rows = _narrow_rows(card, hidden=step < len(FLIP_WIDTHS) // 2, w=w)
+    left, right = (CARD_W - w) // 2, CARD_W - w - (CARD_W - w) // 2
+    return [Text(" " * left) + r + Text(" " * right) for r in rows], 0
+
+
 def _compact_card(card, hidden: bool) -> Text:
     if hidden:
         return Text(" ▒▒ ", BACK_BORDER)
@@ -147,8 +190,12 @@ def _compact_card(card, hidden: bool) -> Text:
     return Text(f" {short_rank(card)}{SUIT_SYMBOLS[card.suit]} ", ink)
 
 
-def render_cards(cards: Sequence, width: int, hide_first: bool = False, compact: bool = False) -> Text:
-    '''Render cards side by side, overlapping or compacting them to fit the width.'''
+def render_cards(cards: Sequence, width: int, hide_first: bool = False, compact: bool = False,
+                 last_age: Optional[float] = None) -> Text:
+    '''
+    Render cards side by side, overlapping or compacting them to fit the width.
+    last_age: seconds since the last card arrived, to draw it mid hit-animation (None = settled).
+    '''
     if not cards:
         return Text("")
     n = len(cards)
@@ -168,12 +215,18 @@ def render_cards(cards: Sequence, width: int, hide_first: bool = False, compact:
         _card_rows(card, hide_first and i == 0, sliver=overlap and i < n - 1)
         for i, card in enumerate(cards)
     ]
+    offset = 0
+    if last_age is not None and last_age < ANIM_S:
+        columns[-1], offset = _animated_rows(cards[-1], last_age)
+        offset = max(0, min(offset, width - (overlap_w if overlap else spread_w)))
     rows = []
     for r in range(5):
         row = Text()
         for i, col in enumerate(columns):
             if i and not overlap:
                 row.append(" ")
+            if i == n - 1 and offset:
+                row.append(" " * offset)
             row.append_text(col[r])
         rows.append(row)
     return Text("\n").join(rows)
@@ -591,6 +644,10 @@ class RichUI(BaseUI):
         self._overlay_title = ""
         self._splash_names: List[str] = []
         self.splash_info = ""
+        self.animate = True                      # hit animation on/off (settings: animate_cards)
+        self._births = weakref.WeakKeyDictionary()  # card -> time it first appeared mid-hand
+        self._anim_until = 0.0
+        self._held_log: deque = deque()          # log lines held back until the card flips
 
     # lifecycle
     def start(self) -> None:
@@ -616,7 +673,11 @@ class RichUI(BaseUI):
 
     # output
     def log(self, message: str) -> None:
-        self._log.append(message)
+        self.refresh()   # registers any card that just arrived, so its log line can wait for the flip
+        if self._held_log or time.monotonic() < self._anim_until:
+            self._held_log.append(message)
+        else:
+            self._log.append(message)
         self.refresh()
 
     def error(self, message: str) -> None:
@@ -628,9 +689,30 @@ class RichUI(BaseUI):
             self._live.refresh()
 
     def pause(self, seconds: float) -> None:
+        end = time.monotonic() + (seconds or 0)
         self.refresh()
-        if seconds:
-            time.sleep(seconds)
+        end = max(end, self._anim_until)   # always let a hit animation finish
+        while (now := time.monotonic()) < end:
+            if now < self._anim_until:
+                time.sleep(min(1 / ANIM_FPS, end - now))
+                self.refresh()
+            else:
+                self.refresh()
+                time.sleep(end - now)
+        self.refresh()
+
+    # hit animation
+    def _card_age(self, cards: Sequence) -> Optional[float]:
+        '''Seconds since the newest card in a hand appeared, while it is still animating.'''
+        if not self.animate or len(cards) < 3:     # the initial two-card deal isn't animated
+            return None
+        card, now = cards[-1], time.monotonic()
+        born = self._births.get(card)
+        if born is None:
+            born = self._births[card] = now
+            self._anim_until = max(self._anim_until, now + ANIM_S)
+        age = now - born
+        return age if age < ANIM_S else None
 
     def set_overlay(self, title: str, renderable) -> None:
         self._overlay_title = title
@@ -710,6 +792,9 @@ class RichUI(BaseUI):
     # rendering
     def _render(self):
         width, height = self.console.size
+        if self._held_log and time.monotonic() >= self._anim_until:
+            while self._held_log:
+                self._log.append(self._held_log.popleft())
         side_log = width >= 100
         self._inline_log = not side_log and height < 32  # short screen: newest log line goes in the footer
         layout = Layout()
@@ -845,9 +930,13 @@ class RichUI(BaseUI):
             status = Text("")
         else:
             hide = not reveal and len(hand.cards) >= 2
-            body = render_cards(hand.cards, width, hide_first=hide, compact=compact)
+            age = self._card_age(hand.cards)
+            body = render_cards(hand.cards, width, hide_first=hide, compact=compact, last_age=age)
             status = Text()
-            if hide:
+            if age is not None:   # don't give the total away before the card flips
+                status.append(hand_label(SimpleNamespace(cards=hand.cards[:-1])), "bold")
+                status.append(" + ?", "grey62")
+            elif hide:
                 status.append(f"Showing {max(hand.cards[1].values)}", "bold")
             else:
                 status.append(hand_label(hand), "bold")
@@ -906,11 +995,19 @@ class RichUI(BaseUI):
             multi = len(player.hands) > 1
             for i, hand in enumerate(player.hands):
                 hand_active = is_active and (self.active_hand is None or self.active_hand == i)
-                parts.append(render_cards(hand.cards, inner_w - 2, compact=compact))
+                age = self._card_age(hand.cards)
+                parts.append(render_cards(hand.cards, inner_w - 2, compact=compact, last_age=age))
                 status = Text()
                 status.append("▶ " if hand_active and phase == "playing" else "  ", "bold gold1")
                 if multi:
                     status.append(f"H{i + 1} ", "grey62")
+                if age is not None:   # don't give the total away before the card flips
+                    status.append(hand_label(SimpleNamespace(cards=hand.cards[:-1])), "bold")
+                    status.append(" + ?", "grey62")
+                    parts.append(status)
+                    bet = player.hand_bets[i] if i < len(player.hand_bets) else player.current_bet
+                    parts.append(Padding(self._chips(bet, None, inner_w - 2, stacks), (0, 0, 0, 2)))
+                    continue
                 status.append(hand_label(hand), "bold")
                 bet = player.hand_bets[i] if i < len(player.hand_bets) else player.current_bet
                 if bet > player.current_bet:

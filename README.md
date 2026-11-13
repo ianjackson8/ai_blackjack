@@ -41,6 +41,15 @@ The `ai-nn` bot has two small neural networks:
 - **Play network** sees its hand total, whether the hand is soft, whether it can double, and the dealer's upcard, and picks hit / stand / double.
 - **Bet network** sees the Hi-Lo true count and how deep into the shoe we are, and picks a bet of 1×, 2×, 4×, 6× or 8× `default_bet`.
 
+## Bot Survival Trial
+Pit BTB Bot, NN Bot and Count Bot against each other: $500 each, no rebuys, out at $0, last one standing wins.
+Prints a stats table and saves a balance graph to `results/`.
+```
+python3 trial.py                  # one trial (seed 1)
+python3 trial.py --seed 7         # a different trial
+python3 trial.py --repeat 200     # plus 200 more trials to see who wins most often
+```
+
 ## Game Settings
 Settings can be changed in-game: on the player name screen press `Tab` (or type `/settings`) to open the settings editor.
 Use `↑`/`↓` to move, `Enter` to edit or toggle, `A`/`R`/`X` to add, rename or remove bots, `S` to save to `game_settings.json`, and `Esc` to cancel.

@@ -6,14 +6,11 @@
     "log_game": false,
     "show_graph": true,
     "deal_delay": 1.5,
+    "animate_cards": true,
     "allow_double_after_split": true,
     "split_limit": -1,
     "allow_insurance": true,
     "bots": [
-        {
-            "name": "BTB Bot",
-            "strategy": "by the books"
-        },
         {
             "name": "NN Bot",
             "strategy": "ai-nn"
