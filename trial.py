@@ -8,7 +8,7 @@ hits $0, last one standing wins. Plots balance over rounds and prints a stats ta
     python3 trial.py --repeat 200         # also run 200 more trials and count who wins
 
 Author: Ian Jackson
-Version v5.0
+Version v5.1
 '''
 
 import argparse
@@ -201,8 +201,9 @@ def main():
         table.add_row(key, *(fmt(key, stats[n][key]) for n in names))
     console.print(table)
 
-    os.makedirs("results", exist_ok=True)
-    path = f"results/trial_seed{args.seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    results = pb.HERE / "results"
+    results.mkdir(exist_ok=True)
+    path = str(results / f"trial_seed{args.seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
     plot(result, path, f"Bot survival trial — ${args.bankroll:,.0f} each, no rebuys (seed {args.seed}) — {winner} wins")
     console.print(f"Graph saved to [bold]{path}[/]")
 

@@ -3,7 +3,7 @@ Basic strategy for this game's rules: multi-deck, dealer stands on soft 17, doub
 two cards, no surrender. Double-after-split is a parameter because it is a game setting.
 
 Author: Ian Jackson
-Version v5.0
+Version v5.1
 '''
 
 from typing import Sequence

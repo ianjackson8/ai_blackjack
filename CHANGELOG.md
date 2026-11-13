@@ -1,0 +1,69 @@
+# Changelog
+
+One entry per release. The newest entry matches `PLUGIN_META["version"]` in `plugin.py` and the release's git tag (`v` + version, e.g. `v5.1.0`).
+
+- v5.1
+  - dealer peeks for blackjack with an Ace or ten showing: a dealer natural ends the round before anyone acts, so you only lose your original bet (#30)
+  - fix crash loading a save after bots were added in settings (#29)
+  - fix bets placed this round being lost when saving or `/exit`-ing during betting (#31)
+  - player names can no longer match a bot's name (#32)
+  - Terminal Casino support: `plugin.py` adapter and a plugin mode (single seat, leave-table key, no money-changing commands)
+  - all files (settings, models, saves, logs) are found relative to the game folder, so it can be launched from anywhere
+- v5.0
+  - full-screen Rich TUI: card art, seat panels, key-driven prompts (`H`/`S`/`D`/`P`), session summary on exit
+  - hit animation: cards slide in face down and flip; totals and log lines wait for the flip (`animate_cards` setting)
+  - chip piles that grow with the bet, with animations for betting, doubling, payouts and losing bets
+  - side panel with a session scoreboard (sparklines, streaks, biggest win) and "Bot Brains" showing each bot's reasoning; `Tab` toggles the full log
+  - in-game settings editor (`Tab` / `/settings` on the name screen)
+  - rework the `ai-nn` bot: correct doubling rewards, credit across multi-step hands, soft-hand and can-double features, and a bet-sizing network driven by the true count; retrained from scratch
+  - add `counter` bot: basic strategy plus an LSTM that learns to count cards from simulated shoes (`--train-counter`) and ramps bets with the estimated edge
+  - add `trial.py`: bot survival trial with balance graph and stats table
+  - redraw the screen only when something changes (was a full repaint 8×/s); faster startup
+  - fix the shoe running out mid-round, bots looping on an unaffordable double, and `insurance_bet` not being initialised
+  - fix payouts: 21 after a split pays 1:1 (only a two-card 21 on an unsplit hand is a blackjack), blackjack vs dealer blackjack pushes, and a dealer blackjack beats a multi-card 21
+- v4.0
+  - add insurance side-bet — offered to human players when dealer shows Ace; pays 2:1; toggleable via `allow_insurance` in settings
+  - add `/stats` command — shows W/L/Push/BJ counts, net P&L, win rate, and best/worst round for all players; also printed automatically at end of session
+  - refactor terminal UI to match slot machine style: `C` color class, box-draw headers, 2-space indented output, `[N]` menu prompts
+  - fix crash when closing `/graph` window mid-game (non-blocking `plt.show`)
+  - fix `show_graph: true` silently failing when `log_game: false` — now warns at startup
+  - fix `IndexError` in train mode when no bots are configured
+  - fix GOD_MODE dealing hand twice and not drawing cards from shoe
+  - fix split hands not being logged (all hands now recorded per round)
+  - fix double-down on split hand corrupting payout for other hands (per-hand bet tracking)
+  - update log format: `hands` (list) and `results` (list) replace single `final_hand`/`result` fields
+- v3.0
+  - fix split feature
+  - add game settings related to splitting mechanics
+  - change settings to use JSON booleans instead of strings
+  - add saving AI models under their name, under `models/` directory
+  - add commands at the betting input (run `/help` to see available commands)
+  - add save/load game feature (`/save`, `--load`)
+  - fix split targeting wrong hand on second/third split
+  - fix post-split dealing sending extra cards to already-played hands
+- v2.2
+  - fix bot being able to double after a hit
+  - fix game ending on first bot going broke
+- v2.1 
+  - add deal delay to simulate drawing cards
+  - add hotkeys for player action
+  - fix play again to only take only yes/no
+- v2.0
+  - add trainable AI bot using Q-learning and PyTorch neural network
+  - add support for multiple bot types from settings (regular bots + AI bots)
+  - fix bot output display showing actions during gameplay
+  - fix AI bot reward system to receive actual game outcomes
+  - add training mode flag (--train) for automated AI training
+- v1.3
+  - fix graph not starting at initial balance on graph
+  - fix bug where when bot doubles it crashes
+  - remove the old blackjack bot file
+  - integrate parse and graph logfile into main file, delete other file
+- v1.2
+  - add the by the books strategy
+  - fix the double feature
+- v1.1
+  - implement bots into the game, one strategy
+- v1.0
+  - implement core blackjack game
+  - add ending graph

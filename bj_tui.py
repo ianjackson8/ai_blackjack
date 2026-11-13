@@ -6,7 +6,7 @@ Two front-ends share one interface:
   HeadlessUI  - plain stdin/stdout fallback (tests, pipes, silent training)
 
 Author: Ian Jackson
-Version v5.0
+Version v5.1
 '''
 
 from __future__ import annotations
@@ -539,6 +539,7 @@ class BaseUI:
     def __init__(self):
         self.game = None
         self.splash_info = ""
+        self.version = ""         # shown on the splash screen, e.g. "v5.1.0"
         self.active_player = None
         self.active_hand: Optional[int] = None
 
@@ -571,6 +572,9 @@ class BaseUI:
         pass
 
     def add_splash_name(self, name: str) -> None:
+        pass
+
+    def set_splash_names(self, names) -> None:
         pass
 
 
@@ -1085,6 +1089,10 @@ class RichUI(BaseUI):
         self._splash_names.append(name)
         self.refresh()
 
+    def set_splash_names(self, names) -> None:
+        self._splash_names = list(names)
+        self.refresh()
+
     # input
     def _read(self) -> str:
         while True:
@@ -1132,8 +1140,8 @@ class RichUI(BaseUI):
         try:
             while True:
                 key = self._read()
-                if hotkeys and key in hotkeys:
-                    return hotkeys[key]
+                if hotkeys and key in hotkeys and not (key == "esc" and self._buffer):
+                    return hotkeys[key]        # an Esc hotkey only fires once the typed text is cleared
                 if key == "enter":
                     return self._buffer.strip() or default
                 if key == "backspace":
@@ -1226,6 +1234,11 @@ class RichUI(BaseUI):
         game = self.game
         if game is not None:
             total = game.num_decks * 52
+            if getattr(game, "plugin_mode", False) and game.players:
+                # at the casino the header carries the player's wallet, like the other tables
+                you = game.players[0]
+                info.append(f"{you.name}   ", "bold")
+                info.append(f"{money(you.balance)}   ", "bold green")
             info.append(f"Round {game.game_num}", "bold")
             info.append(f"   Shoe {len(game.shoe)}/{total}")
             info.append(f"   {game.num_decks} deck{'s' if game.num_decks != 1 else ''}")
@@ -1273,7 +1286,7 @@ class RichUI(BaseUI):
         logo_cards = [SimpleNamespace(rank="Ace", suit="Spades"), SimpleNamespace(rank="King", suit="Hearts")]
         logo = render_cards(logo_cards, width=40)
         title = Text("B L A C K J A C K", "bold gold1")
-        subtitle = Text("v5.0  ·  humans vs. bots vs. the house", "grey62")
+        subtitle = Text(f"{self.version}  ·  humans vs. bots vs. the house", "grey62")
         names = Table.grid(padding=(0, 2))
         names.add_column(style="gold1")
         names.add_column(style="bold")

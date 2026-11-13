@@ -12,7 +12,7 @@ From a predicted composition we derive:
 and the bet is ramped up with the edge.
 
 Author: Ian Jackson
-Version v5.0
+Version v5.1
 '''
 
 import random

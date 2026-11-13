@@ -55,7 +55,20 @@ python3 trial.py --seed 7         # a different trial
 python3 trial.py --repeat 200     # plus 200 more trials to see who wins most often
 ```
 
-## Game Settings
+## Terminal Casino
+This repo doubles as a [Terminal Casino](../terminal_casino) game: `plugin.py` is the adapter the casino loads.
+Add it to the casino as `plugins/ai_blackjack` (git submodule or a copy) and it appears in the lobby.
+
+At the casino the game runs in *plugin mode*:
+- one seat for the casino player, no bots
+- the casino's wallet is the bankroll; the game's `init_balance` isn't used
+- `Esc` (or `/leave`) at the bet prompt, or `L`/`Q`/`Esc` after a round, leaves the table and returns the balance; `?` shows the commands
+- money/persistence commands are off (`/editbalance`, `/godmode`, `/save`, `/load`, `/graph`), and there's no save prompt or graph on exit
+- `Ctrl-C` leaves too: bets for a round that hasn't been dealt are returned, a hand already in play is forfeited
+- rules still come from this folder's `game_settings.json`
+
+Running `python3 play_blackjack.py` directly is unchanged.
+
 Settings can be changed in-game: on the player name screen press `Tab` (or type `/settings`) to open the settings editor.
 Use `↑`/`↓` to move, `Enter` to edit or toggle, `A`/`R`/`X` to add, rename or remove bots, `S` to save to `game_settings.json`, and `Esc` to cancel.
 
@@ -114,62 +127,5 @@ The `ai-nn` bot uses deep Q-learning:
 - **Training**: ε-greedy exploration, experience replay, a target network, Smooth L1 loss
 - **Model persistence**: saved to `models/{bot_name}_model.pth`; models from older versions are rejected and retrained from scratch
 
-# Changelog
-- v5.0
-  - full-screen Rich TUI: card art, seat panels, key-driven prompts (`H`/`S`/`D`/`P`), session summary on exit
-  - hit animation: cards slide in face down and flip; totals and log lines wait for the flip (`animate_cards` setting)
-  - chip piles that grow with the bet, with animations for betting, doubling, payouts and losing bets
-  - side panel with a session scoreboard (sparklines, streaks, biggest win) and "Bot Brains" showing each bot's reasoning; `Tab` toggles the full log
-  - in-game settings editor (`Tab` / `/settings` on the name screen)
-  - rework the `ai-nn` bot: correct doubling rewards, credit across multi-step hands, soft-hand and can-double features, and a bet-sizing network driven by the true count; retrained from scratch
-  - add `counter` bot: basic strategy plus an LSTM that learns to count cards from simulated shoes (`--train-counter`) and ramps bets with the estimated edge
-  - add `trial.py`: bot survival trial with balance graph and stats table
-  - redraw the screen only when something changes (was a full repaint 8×/s); faster startup
-  - fix the shoe running out mid-round, bots looping on an unaffordable double, and `insurance_bet` not being initialised
-  - fix payouts: 21 after a split pays 1:1 (only a two-card 21 on an unsplit hand is a blackjack), blackjack vs dealer blackjack pushes, and a dealer blackjack beats a multi-card 21
-- v4.0
-  - add insurance side-bet — offered to human players when dealer shows Ace; pays 2:1; toggleable via `allow_insurance` in settings
-  - add `/stats` command — shows W/L/Push/BJ counts, net P&L, win rate, and best/worst round for all players; also printed automatically at end of session
-  - refactor terminal UI to match slot machine style: `C` color class, box-draw headers, 2-space indented output, `[N]` menu prompts
-  - fix crash when closing `/graph` window mid-game (non-blocking `plt.show`)
-  - fix `show_graph: true` silently failing when `log_game: false` — now warns at startup
-  - fix `IndexError` in train mode when no bots are configured
-  - fix GOD_MODE dealing hand twice and not drawing cards from shoe
-  - fix split hands not being logged (all hands now recorded per round)
-  - fix double-down on split hand corrupting payout for other hands (per-hand bet tracking)
-  - update log format: `hands` (list) and `results` (list) replace single `final_hand`/`result` fields
-- v3.0
-  - fix split feature
-  - add game settings related to splitting mechanics
-  - change settings to use JSON booleans instead of strings
-  - add saving AI models under their name, under `models/` directory
-  - add commands at the betting input (run `/help` to see available commands)
-  - add save/load game feature (`/save`, `--load`)
-  - fix split targeting wrong hand on second/third split
-  - fix post-split dealing sending extra cards to already-played hands
-- v2.2
-  - fix bot being able to double after a hit
-  - fix game ending on first bot going broke
-- v2.1 
-  - add deal delay to simulate drawing cards
-  - add hotkeys for player action
-  - fix play again to only take only yes/no
-- v2.0
-  - add trainable AI bot using Q-learning and PyTorch neural network
-  - add support for multiple bot types from settings (regular bots + AI bots)
-  - fix bot output display showing actions during gameplay
-  - fix AI bot reward system to receive actual game outcomes
-  - add training mode flag (--train) for automated AI training
-- v1.3
-  - fix graph not starting at initial balance on graph
-  - fix bug where when bot doubles it crashes
-  - remove the old blackjack bot file
-  - integrate parse and graph logfile into main file, delete other file
-- v1.2
-  - add the by the books strategy
-  - fix the double feature
-- v1.1
-  - implement bots into the game, one strategy
-- v1.0
-  - implement core blackjack game
-  - add ending graph
+## Changelog
+See [CHANGELOG.md](CHANGELOG.md).

@@ -3,7 +3,7 @@
 Play blackjack in terminal
 
 Author: Ian Jackson
-Version v5.0
+Version v5.1
 '''
 
 import random
@@ -21,10 +21,11 @@ from collections import deque
 from itertools import count as _counter
 from typing import List, Optional, Union
 from datetime import datetime
+from pathlib import Path
 
-from counter import BASE_EDGE, bet_units, load_counter, make_tracker, save_counter, train_counter, evaluate_counter
-from strategy import basic_strategy
-from tui import (HeadlessUI, RichUI, card_markup, edit_settings, esc, hand_label, hand_total, key_value_table, money,
+from bj_counter import BASE_EDGE, bet_units, load_counter, make_tracker, save_counter, train_counter, evaluate_counter
+from bj_strategy import basic_strategy
+from bj_tui import (HeadlessUI, RichUI, card_markup, edit_settings, esc, hand_label, hand_total, key_value_table, money,
                  signed_money, stats_table)
 
 #== Global Variables ==#
@@ -34,10 +35,19 @@ SHOW_GRAPH = True
 DEFAULT_BET = 10
 TRAIN_MODE = False
 GOD_MODE = False
+# Set while running inside Terminal Casino (see play_as_plugin / plugin.py). The casino owns the
+# player's money, so commands that create or persist it are off, and leaving returns to the lobby.
+PLUGIN_MODE = False
 
 NULL_UI = HeadlessUI(verbose=False)
 
-SETTINGS_FILE = 'game_settings.json'
+# Every file the game reads or writes lives next to this file, wherever it's launched from
+# (Terminal Casino runs games from its own directory).
+HERE = Path(__file__).resolve().parent
+SETTINGS_FILE = str(HERE / 'game_settings.json')
+MODELS_DIR = HERE / "models"
+SAVES_DIR = HERE / "saves"
+LOGS_DIR = HERE / "logs"
 BOT_STRATEGIES = ["by the books", "default", "ai-nn", "counter", "counter-hilo"]
 
 # Fields shown in the in-game settings editor (bots are edited separately)
@@ -70,6 +80,22 @@ COMMANDS = [
     ("/save [name]", "Save the game"),
     ("/load [name]", "Info on loading a save"),
 ]
+PLUGIN_COMMANDS = [
+    ("/help  or  ?", "Show this message"),
+    ("/leave  or  Esc", "Leave the table and return to the casino"),
+    ("/stats", "Show win/loss statistics"),
+    ("/showbalance", "Show all balances"),
+    ("/shuffle", "Reshuffle the deck"),
+]
+CASINO_DISABLED = {"editbalance", "godmode", "save", "load", "graph"}
+
+
+class LeaveTable(Exception):
+    '''Raised from deep inside a round (plugin mode) to leave the table.'''
+
+
+class QuitGame(Exception):
+    '''Standalone /exit: the game has been wrapped up; main() ends the program.'''
 
 #== Classes ==#
 
@@ -383,7 +409,7 @@ class Bot(Player):
             raise ValueError(f"Invalid bot strategy: {self.strategy}.")
 
 
-COUNTER_MODEL_PATH = "models/card_counter_lstm.pth"
+COUNTER_MODEL_PATH = str(MODELS_DIR / "card_counter_lstm.pth")
 # strategy name -> how the bot tracks the shoe ("counter" is the LSTM; the others are for comparison)
 COUNTER_TRACKERS = {"counter": "lstm", "counter-hilo": "hi-lo", "counter-perfect": "perfect", "counter-flat": "flat"}
 
@@ -391,7 +417,7 @@ COUNTER_TRACKERS = {"counter": "lstm", "counter-hilo": "hi-lo", "counter-perfect
 class CounterBot(Bot):
     '''
     Plays perfect basic strategy (including splits) and sizes bets from a card-count tracker.
-    With strategy "counter" the tracker is the LSTM in counter.py; it watches every card that
+    With strategy "counter" the tracker is the LSTM in bj_counter.py; it watches every card that
     becomes visible and its predicted shoe composition is turned into an edge estimate.
     '''
 
@@ -507,6 +533,7 @@ class BlackjackGame:
         self.split_limit = split_limit if split_limit != 0 else 1
         self.allow_insurance = allow_insurance
         self.phase = "betting"
+        self.plugin_mode = PLUGIN_MODE
 
         saved_player_balances = {}
         saved_bot_balances = {}
@@ -525,7 +552,7 @@ class BlackjackGame:
         if any(b.get('strategy') == 'counter' for b in bot_info):
             try:
                 self.counter_model = load_counter(COUNTER_MODEL_PATH)
-                self.ui.log(f"[grey50]Card-counter LSTM loaded from {COUNTER_MODEL_PATH}[/]")
+                self.ui.log(f"[grey50]Card-counter LSTM loaded from {rel(COUNTER_MODEL_PATH)}[/]")
             except (FileNotFoundError, ValueError):
                 self.ui.log("[yellow]No card-counter model yet — counter bots bet flat. "
                             "Train one with: python3 play_blackjack.py --train-counter[/]")
@@ -549,23 +576,18 @@ class BlackjackGame:
         self.round_data = {}
         self.game_num = save_data["rounds_played"] if save_data else 0
 
-        if save_data and "balance_history" in save_data:
-            self.balance_history = save_data["balance_history"]
-        else:
-            self.balance_history = {p.name: [p.balance] for p in self.players}
-            for bot in self.bots:
-                self.balance_history[bot.name] = [bot.balance]
+        self.balance_history = dict(save_data.get("balance_history", {})) if save_data else {}
+        for seat in self.players + self.bots:
+            # seats new since the save (e.g. a bot added in settings) start a fresh history
+            self.balance_history.setdefault(seat.name, [seat.balance])
 
-        if not os.path.exists("models"):
-            os.makedirs("models")
-        if not os.path.exists("saves"):
-            os.makedirs("saves")
+        MODELS_DIR.mkdir(exist_ok=True)
 
         for bot in self.bots:
             if isinstance(bot, TrainableBot):
                 try:
                     bot_name = bot.name.replace(" ", "_")
-                    additional_data = bot.load(f"models/{bot_name}_model.pth", log=self.ui.log)
+                    additional_data = bot.load(model_path(bot.name), log=self.ui.log)
                     bot.epsilon = saved_bot_epsilons.get(bot.name, additional_data.get("epsilon", 1.0))
                 except FileNotFoundError:
                     self.ui.log(f"[cyan]No saved model for {esc(bot.name)} — starting fresh.[/]")
@@ -815,9 +837,15 @@ class BlackjackGame:
         self.ui.set_active(player)
         while True:
             suggested = player.last_bet if 0 < player.last_bet <= player.balance else min(DEFAULT_BET, player.balance)
-            raw = self.ui.ask(
-                f"[bold]{esc(player.name)}[/] ([green]{money(player.balance)}[/]) — bet amount, 0 to sit out, /help for commands",
-                default=f"{suggested:g}")
+            if self.plugin_mode:
+                raw = self.ui.ask(
+                    f"[bold]{esc(player.name)}[/] ([green]{money(player.balance)}[/]) — place your bet, 0 to sit out  "
+                    f"[grey62]Esc leave table · ? help[/]",
+                    default=f"{suggested:g}", hotkeys={"esc": "/leave", "?": "/help"})
+            else:
+                raw = self.ui.ask(
+                    f"[bold]{esc(player.name)}[/] ([green]{money(player.balance)}[/]) — bet amount, 0 to sit out, /help for commands",
+                    default=f"{suggested:g}")
             if raw.startswith('/'):
                 self.parse_command(raw[1:])
                 continue
@@ -855,8 +883,15 @@ class BlackjackGame:
         if self.allow_insurance and self.dealer.hands[0].cards[1].rank == "Ace":
             self.offer_insurance()
 
+        # US rules: with an Ace or ten showing, the dealer peeks; a dealer blackjack ends the round
+        # before anyone acts, so players only ever lose their original bet to it
+        dealer_peeked_blackjack = self.dealer.hands[0].is_blackjack()
+        if dealer_peeked_blackjack:
+            self.ui.log("Dealer peeks… [bold red]Blackjack![/]")
+            self.ui.pause(self.deal_delay)
+
         for player in self.seats:
-            if player.current_bet > 0:
+            if player.current_bet > 0 and not dealer_peeked_blackjack:
                 if isinstance(player, (Bot, TrainableBot)):
                     player.play_turn(self.shoe, str(self.dealer.hands[0].cards[1]), self.deal_delay, ui=self.ui)
                 else:
@@ -911,6 +946,14 @@ class BlackjackGame:
 
     def play_game(self):
         self.ui.attach(self)
+        try:
+            self._round_loop()
+        except LeaveTable:
+            pass
+        self.end_game()
+
+    def _round_loop(self) -> None:
+        leave = (("l", "q", "esc"), "n", "Leave table") if self.plugin_mode else ("nq", "n", "Quit")
         while True:
             if TRAIN_MODE:
                 if not self.bots or self.game_num >= self.train_until:
@@ -923,12 +966,11 @@ class BlackjackGame:
 
             choice = None
             while choice not in ("y", "n"):
-                choice = self.ui.choose("Round over.", [("y ", "y", "Next round"), ("nq", "n", "Quit")], default="y")
+                choice = self.ui.choose("Round over.", [("y ", "y", "Next round"), leave], default="y")
                 if choice not in ("y", "n"):
                     self.ui.error("Enter Y or N.")
             if choice == "n":
                 break
-        self.end_game()
 
     def log_game(self):
         log_entry = {
@@ -982,7 +1024,7 @@ class BlackjackGame:
     def save_models(self) -> None:
         for bot in self.bots:
             if isinstance(bot, TrainableBot):
-                bot.save(f"models/{bot.name.replace(' ', '_')}_model.pth", log=self.ui.log)
+                bot.save(model_path(bot.name), log=self.ui.log)
 
     def end_game(self):
         self.phase = "over"
@@ -990,6 +1032,14 @@ class BlackjackGame:
         self.flush_log()
 
         self.save_models()
+
+        if self.plugin_mode:
+            # the casino takes the terminal straight back, so the summary has to be shown in our UI
+            self.ui.set_overlay(f"Session Summary — {self.game_num} rounds", stats_table(self))
+            self.ui.wait_key("Press any key to return to the casino")
+            self.ui.clear_overlay()
+            self.ui.stop()
+            return
 
         saved_msg = None
         if not TRAIN_MODE:
@@ -1016,29 +1066,71 @@ class BlackjackGame:
         global SHOW_GRAPH
         if SHOW_GRAPH: parse_log_and_plot(self.log_file, log=self.ui.print_after)
 
+    def _settled_balance(self, player: Player):
+        '''Balance with any bet placed this round still counted — while betting, the round hasn't been played.'''
+        return player.balance + (sum(player.hand_bets) if self.phase == "betting" else 0)
+
+    def _rounds_completed(self) -> int:
+        return self.game_num - 1 if self.phase == "betting" else self.game_num
+
+    def rules(self) -> List[tuple]:
+        '''The table's rules as (rule, detail) rows, from the current settings.'''
+        decks = f"{self.num_decks} deck{'s' if self.num_decks != 1 else ''}"
+        splits = "no limit" if self.split_limit == -1 else f"up to {self.split_limit} time{'s' if self.split_limit != 1 else ''}"
+        return [
+            ("Goal", "Get closer to 21 than the dealer without going over"),
+            ("Shoe", f"{decks}, reshuffled near the end"),
+            ("Blackjack", "An Ace and a ten-card on your first two cards pays 3:2"),
+            ("Wins / pushes", "Other wins pay 1:1; a tie returns your bet"),
+            ("Dealer", "Stands on all 17s; with an Ace or ten showing, checks for blackjack first"),
+            ("Double", "On any first two cards" + ("; also after splitting" if self.allow_double_after_split
+                                                     else "; not after splitting")),
+            ("Split", f"Two cards of the same rank, {splits}. 21 after a split pays 1:1"),
+            ("Insurance", "Up to half your bet when the dealer shows an Ace; pays 2:1" if self.allow_insurance
+             else "Not offered"),
+        ]
+
+    def cash_out_balance(self, player: Player) -> float:
+        '''
+        What a player walks away with if play stops right now (e.g. Ctrl-C at the casino): bets placed
+        for a round that hasn't been dealt are returned; a hand already in play is forfeited.
+        '''
+        return max(0.0, float(self._settled_balance(player)))
+
+    def refund_unplayed_bets(self) -> None:
+        '''Quitting mid-betting: hand back bets for a round that will never be dealt.'''
+        if self.phase != "betting":
+            return
+        for player in self.seats:
+            player.balance = self._settled_balance(player)
+            player.current_bet, player.hand_bets = 0, []
+        self.game_num = self._rounds_completed()
+
     def save_game(self, save_name: str) -> str:
         save_name = save_name.strip().replace(".json", "")
-        save_path = f"saves/{save_name}.json"
+        SAVES_DIR.mkdir(exist_ok=True)
+        save_path = str(SAVES_DIR / f"{save_name}.json")
 
         save_data = {
             "saved_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-            "rounds_played": self.game_num,
-            "players": [{"name": p.name, "balance": p.balance} for p in self.players],
+            "rounds_played": self._rounds_completed(),
+            "players": [{"name": p.name, "balance": self._settled_balance(p)} for p in self.players],
             "bots": [],
             "balance_history": self.balance_history
         }
 
         for bot in self.bots:
             if isinstance(bot, TrainableBot):
-                bot_entry = {"name": bot.name, "strategy": "ai-nn", "balance": bot.balance, "epsilon": bot.epsilon}
+                bot_entry = {"name": bot.name, "strategy": "ai-nn", "balance": self._settled_balance(bot),
+                             "epsilon": bot.epsilon}
             else:
-                bot_entry = {"name": bot.name, "strategy": bot.strategy, "balance": bot.balance}
+                bot_entry = {"name": bot.name, "strategy": bot.strategy, "balance": self._settled_balance(bot)}
             save_data["bots"].append(bot_entry)
 
         with open(save_path, 'w') as f:
             json.dump(save_data, f, indent=4)
 
-        msg = f"Saved to {save_path} — load with: python3 play_blackjack.py --load {save_name}"
+        msg = f"Saved to {rel(save_path)} — load with: python3 play_blackjack.py --load {save_name}"
         self.ui.log(f"[green]{esc(msg)}[/]")
         return msg
 
@@ -1049,12 +1141,28 @@ class BlackjackGame:
             return
         name = parts[0].lower()
 
+        if self.plugin_mode:
+            if name in ("leave", "exit", "quit"):
+                self.refund_unplayed_bets()
+                raise LeaveTable()
+            if name in CASINO_DISABLED:
+                self.ui.error(f"/{name} isn't available at the casino.")
+                return
+
         if name == 'help':
-            self.ui.show_info("Commands", key_value_table(COMMANDS))
+            if self.plugin_mode:
+                from rich.console import Group
+                from rich.text import Text
+                self.ui.show_info("Rules & Commands", Group(
+                    Text("Table rules", "bold gold1"), key_value_table(self.rules()),
+                    Text(""), Text("Commands", "bold gold1"), key_value_table(PLUGIN_COMMANDS)))
+            else:
+                self.ui.show_info("Commands", key_value_table(COMMANDS))
 
         elif name == 'exit':
+            self.refund_unplayed_bets()
             self.end_game()
-            sys.exit(0)
+            raise QuitGame()
 
         elif name == 'stats':
             self.print_stats()
@@ -1280,6 +1388,7 @@ class TrainableBot(Player):
             else:
                 self.memory.append((state, idx, 0.0, self.trajectory[t + 1][0], False))
         self.trajectory = []
+        self.doubled = False     # a round can end before the bot acts (dealer blackjack)
 
         if self.bet_state is not None and base_bet:
             self.bet_memory.append((self.bet_state, self.bet_action, net_change / base_bet))
@@ -1339,7 +1448,7 @@ class TrainableBot(Player):
             "additional_data": {"epsilon": self.epsilon, "train_steps": self.train_steps},
         }, file_path)
         if log:
-            log(f"[grey50]Model saved to {esc(file_path)}[/]")
+            log(f"[grey50]Model saved to {esc(rel(file_path))}[/]")
 
     def load(self, file_path: str, log=None) -> dict:
         '''Load a checkpoint. Raises FileNotFoundError, or ValueError for an older architecture.'''
@@ -1354,11 +1463,46 @@ class TrainableBot(Player):
         extra = checkpoint.get("additional_data", {})
         self.train_steps = extra.get("train_steps", 0)
         if log:
-            log(f"[grey50]Model loaded from {esc(file_path)}[/]")
+            log(f"[grey50]Model loaded from {esc(rel(file_path))}[/]")
         return extra
 
 
 #== Functions ==#
+
+def rel(path) -> str:
+    '''A path as shown to the player: relative to the game folder when it's inside it.'''
+    try:
+        return str(Path(path).resolve().relative_to(HERE))
+    except ValueError:
+        return str(path)
+
+
+def game_version() -> str:
+    '''The release version, read from PLUGIN_META in plugin.py (the single source of truth).'''
+    import ast
+    try:
+        tree = ast.parse((HERE / "plugin.py").read_text())
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "PLUGIN_META" for t in node.targets):
+                return str(ast.literal_eval(node.value)["version"])
+    except (OSError, SyntaxError, ValueError, KeyError):
+        pass
+    return "?"
+
+
+def model_path(bot_name: str) -> str:
+    return str(MODELS_DIR / f"{bot_name.replace(' ', '_')}_model.pth")
+
+
+def new_log_file() -> str:
+    '''Path for this session's log (created now if logging is on).'''
+    if not LOG_GAME:
+        return str(LOGS_DIR / "session_NULL.json")
+    LOGS_DIR.mkdir(exist_ok=True)
+    log_file = LOGS_DIR / f'session_{datetime.now().strftime("%Y-%m-%d_%H%M%S")}.json'
+    log_file.write_text("[]")
+    return str(log_file)
+
 
 def get_card_value(card_str: str) -> int:
     rank = card_str.split(" ")[0]
@@ -1381,7 +1525,7 @@ def parse_log_and_plot(log_file, block=True, log=print):
         log(f"Failed to parse log file {log_file}.")
         return
 
-    with open('game_settings.json', 'r') as file:
+    with open(SETTINGS_FILE, 'r') as file:
         settings = json.load(file)
 
     try:
@@ -1447,6 +1591,10 @@ def open_settings(ui, settings: dict) -> None:
     ui.refresh()
 
 
+def bot_names(settings: Optional[dict]) -> set:
+    return {b.get("name", "").lower() for b in (settings or {}).get("bots", [])}
+
+
 def ask_player_names(ui, settings: Optional[dict] = None) -> List[str]:
     players = []
     if settings is not None:
@@ -1459,6 +1607,12 @@ def ask_player_names(ui, settings: Optional[dict] = None) -> List[str]:
                       hotkeys={"tab": "/settings"} if settings is not None else None).strip()
         if name.lower() == "/settings" and settings is not None:
             open_settings(ui, settings)
+            # a bot added or renamed in settings may now share a name with someone already seated
+            clashes = [p for p in players if p.lower() in bot_names(settings)]
+            if clashes:
+                players = [p for p in players if p not in clashes]
+                ui.set_splash_names(players)
+                ui.error(f"{', '.join(clashes)} now matches a bot's name — enter a different name.")
             continue
         if not name or name.lower() == "done":
             if players:
@@ -1466,6 +1620,8 @@ def ask_player_names(ui, settings: Optional[dict] = None) -> List[str]:
             ui.error("Must have at least one player.")
         elif name.lower() in (p.lower() for p in players):
             ui.error(f"'{name}' is already at the table.")
+        elif name.lower() in bot_names(settings):
+            ui.error(f"'{name}' is a bot's name — pick another (stats are kept by name).")
         else:
             players.append(name)
             ui.add_splash_name(name)
@@ -1479,8 +1635,52 @@ def make_ui(train_mode: bool, show_output: bool):
     return RichUI()
 
 
+#== Terminal Casino ==#
+def play_as_plugin(player_name: str, balance: float) -> float:
+    '''
+    Run one visit to the table for Terminal Casino and return the player's balance when they leave.
+    Single seat, no bots; game rules come from this folder's game_settings.json. Never exits the
+    process, and always gives the terminal back.
+    '''
+    global PLUGIN_MODE, TRAIN_MODE, GOD_MODE, SHOW_GRAPH
+    with open(SETTINGS_FILE, 'r') as file:
+        settings = json.load(file)
+    apply_settings(settings)
+    PLUGIN_MODE, TRAIN_MODE, GOD_MODE, SHOW_GRAPH = True, False, False, False   # fresh state every visit
+
+    ui = make_ui(train_mode=False, show_output=True)
+    ui.animate = bool(settings.get("animate_cards", True))
+    game = None
+    try:
+        ui.start()
+        game = BlackjackGame(
+            num_decks=settings['num_decks'],
+            player_names=[player_name],
+            bot_info=[],
+            starting_balance=float(balance),
+            log_file=new_log_file(),
+            deal_delay=settings['deal_delay'],
+            allow_double_after_split=settings.get('allow_double_after_split', True),
+            split_limit=settings.get('split_limit', 1),
+            allow_insurance=settings.get('allow_insurance', True),
+            ui=ui,
+        )
+        game.play_game()
+        return max(0.0, float(game.players[0].balance))
+    except (KeyboardInterrupt, EOFError):
+        # Ctrl-C means "leave now": keep winnings so far instead of letting the casino roll back
+        if game is None:
+            return float(balance)
+        game.flush_log()
+        return game.cash_out_balance(game.players[0])
+    finally:
+        ui.stop()
+        PLUGIN_MODE = False
+
+
 #== Main ==#
-def main():
+def main() -> int:
+    '''Standalone entry point. Returns the process exit code (never calls sys.exit itself).'''
     parser = argparse.ArgumentParser()
     parser.add_argument("--train", action='store_true', help="Train AI mode — no player interaction")
     parser.add_argument("--load", type=str, default=None, help="Load a saved game by save name")
@@ -1489,15 +1689,15 @@ def main():
     args = parser.parse_args()
 
     if args.train_counter is not None:
-        os.makedirs("models", exist_ok=True)
+        MODELS_DIR.mkdir(exist_ok=True)
         print(f"Training the card-counting LSTM for {args.train_counter:,} steps on simulated shoes…")
         model = train_counter(steps=args.train_counter)
         save_counter(model, COUNTER_MODEL_PATH)
         print("Average true-count error by shoe size (lower is better):")
         for decks in (1, 2, 6, 8):
             print(f"  {decks} deck{'s' if decks > 1 else ' '}: {evaluate_counter(model, shoes=20, decks=decks):.2f}")
-        print(f"Saved to {COUNTER_MODEL_PATH}")
-        return
+        print(f"Saved to {rel(COUNTER_MODEL_PATH)}")
+        return 0
 
     with open(SETTINGS_FILE, 'r') as file:
         settings = json.load(file)
@@ -1507,22 +1707,23 @@ def main():
     TRAIN_MODE = args.train
 
     ui = make_ui(TRAIN_MODE, SHOW_OUTPUT)
+    ui.version = f"v{game_version()}"
 
     if TRAIN_MODE and not settings.get('bots'):
         print("Train mode requires at least one bot configured in game_settings.json.")
-        sys.exit(1)
+        return 1
 
     save_data = None
     if args.load:
         save_name = args.load.replace(".json", "")
-        save_path = f"saves/{save_name}.json"
+        save_path = str(SAVES_DIR / f"{save_name}.json")
         try:
             with open(save_path, 'r') as f:
                 save_data = json.load(f)
             ui.log(f"[green]Loaded save: {esc(save_name)}[/]")
         except FileNotFoundError:
-            print(f"Save file '{save_path}' not found.")
-            sys.exit(1)
+            print(f"Save file '{rel(save_path)}' not found.")
+            return 1
 
     bj_game = None
     try:
@@ -1530,6 +1731,12 @@ def main():
 
         if save_data:
             players = [p["name"] for p in save_data["players"]]
+            clashes = [p for p in players if p.lower() in bot_names(settings)]
+            if clashes:
+                ui.stop()
+                print(f"Can't load: player {', '.join(clashes)} has the same name as a bot in {SETTINGS_FILE}. "
+                      "Rename the bot in settings first.")
+                return 1
         elif TRAIN_MODE:
             players = []
         else:
@@ -1540,14 +1747,7 @@ def main():
             ui.log("[yellow]Balance graph needs game logging on — graph will be skipped.[/]")
             SHOW_GRAPH = False
 
-        if LOG_GAME:
-            if not os.path.exists("logs"):
-                os.mkdir("logs")
-            log_file = f'logs/session_{datetime.now().strftime("%Y-%m-%d_%H%M%S")}.json'
-            with open(log_file, 'w') as file:
-                file.write("[]")
-        else:
-            log_file = 'logs/session_NULL.json'
+        log_file = new_log_file()
 
         ui.animate = bool(settings.get("animate_cards", True)) and not TRAIN_MODE
         bj_game = BlackjackGame(
@@ -1571,6 +1771,8 @@ def main():
             ui.log(f"[bold]Training for {rounds:,} rounds[/] (deal delay off)")
 
         bj_game.play_game()
+    except QuitGame:
+        pass
     except (KeyboardInterrupt, EOFError):
         ui.stop()
         if TRAIN_MODE and bj_game is not None:
@@ -1579,10 +1781,11 @@ def main():
             print(f"\nTraining stopped after {bj_game.game_num:,} rounds — models saved.")
         else:
             print("\nGame interrupted — progress since the last save was not kept.")
-        sys.exit(130)
+        return 130
     finally:
         ui.stop()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
