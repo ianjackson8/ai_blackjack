@@ -115,6 +115,11 @@ The `ai-nn` bot uses deep Q-learning:
 - **Model persistence**: saved to `models/{bot_name}_model.pth`; models from older versions are rejected and retrained from scratch
 
 # Changelog
+- v5.1
+  - dealer peeks for blackjack with an Ace or ten showing: a dealer natural ends the round before anyone acts, so you only lose your original bet (#30)
+  - fix crash loading a save after bots were added in settings (#29)
+  - fix bets placed this round being lost when saving or `/exit`-ing during betting (#31)
+  - player names can no longer match a bot's name (#32)
 - v5.0
   - full-screen Rich TUI: card art, seat panels, key-driven prompts (`H`/`S`/`D`/`P`), session summary on exit
   - hit animation: cards slide in face down and flip; totals and log lines wait for the flip (`animate_cards` setting)
