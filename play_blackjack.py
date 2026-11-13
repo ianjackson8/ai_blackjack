@@ -23,9 +23,9 @@ from typing import List, Optional, Union
 from datetime import datetime
 from pathlib import Path
 
-from counter import BASE_EDGE, bet_units, load_counter, make_tracker, save_counter, train_counter, evaluate_counter
-from strategy import basic_strategy
-from tui import (HeadlessUI, RichUI, card_markup, edit_settings, esc, hand_label, hand_total, key_value_table, money,
+from bj_counter import BASE_EDGE, bet_units, load_counter, make_tracker, save_counter, train_counter, evaluate_counter
+from bj_strategy import basic_strategy
+from bj_tui import (HeadlessUI, RichUI, card_markup, edit_settings, esc, hand_label, hand_total, key_value_table, money,
                  signed_money, stats_table)
 
 #== Global Variables ==#
@@ -417,7 +417,7 @@ COUNTER_TRACKERS = {"counter": "lstm", "counter-hilo": "hi-lo", "counter-perfect
 class CounterBot(Bot):
     '''
     Plays perfect basic strategy (including splits) and sizes bets from a card-count tracker.
-    With strategy "counter" the tracker is the LSTM in counter.py; it watches every card that
+    With strategy "counter" the tracker is the LSTM in bj_counter.py; it watches every card that
     becomes visible and its predicted shoe composition is turned into an edge estimate.
     '''
 
