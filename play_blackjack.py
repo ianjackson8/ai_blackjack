@@ -16,7 +16,6 @@ import torch
 import numpy as np
 import torch.nn as nn
 import torch.optim as optim
-import matplotlib.pyplot as plt
 
 from collections import deque
 from itertools import count as _counter
@@ -1365,6 +1364,7 @@ def parse_log_and_plot(log_file, block=True, log=print):
                     else:
                         player_balances[name].append((round_number, balance))
 
+        import matplotlib.pyplot as plt   # imported here: it adds ~0.2s to startup
         plt.figure(figsize=(10, 6))
         for player, rounds_and_balances in player_balances.items():
             rounds, balances = zip(*rounds_and_balances)

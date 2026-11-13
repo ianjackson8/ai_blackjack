@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 import weakref
 from collections import deque
@@ -53,6 +54,7 @@ ANIM_S = SLIDE_S + FLIP_S
 SLIDE_COLS = 12          # how far to the right the card starts
 FLIP_WIDTHS = (5, 3, 1, 3, 5)   # card width through the flip (edge-on in the middle)
 ANIM_FPS = 30
+MAX_FPS = 30             # cap on screen redraws; the screen is only redrawn when something changed
 
 RESULT_BADGES = {
     "blackjack": (" BLACKJACK ", "bold black on gold1"),
@@ -648,32 +650,62 @@ class RichUI(BaseUI):
         self._births = weakref.WeakKeyDictionary()  # card -> time it first appeared mid-hand
         self._anim_until = 0.0
         self._held_log: deque = deque()          # log lines held back until the card flips
+        self._dirty = threading.Event()          # set by refresh(); the draw thread repaints once per burst
+        self._drawer: Optional[threading.Thread] = None
+        self._running = False
 
     # lifecycle
     def start(self) -> None:
         if self._live:
             return
         self._keys.__enter__()
+        # No auto-refresh: a full-screen frame is ~35 KB of escape codes, so repainting an unchanged
+        # screen 8x a second just floods the terminal. A draw thread repaints only when refresh()
+        # marks the screen dirty (or the terminal is resized), at most MAX_FPS times a second.
         self._live = Live(
             get_renderable=self._render,
             console=self.console,
             screen=True,
-            auto_refresh=True,
-            refresh_per_second=8,
+            auto_refresh=False,
             redirect_stdout=False,
             redirect_stderr=False,
         )
         self._live.start()
+        self._running = True
+        self._drawer = threading.Thread(target=self._draw_loop, name="tui-draw", daemon=True)
+        self._drawer.start()
 
     def stop(self) -> None:
         if self._live:
+            self._running = False
+            self._dirty.set()
+            if self._drawer:
+                self._drawer.join(timeout=1)
+            self._live.refresh()
             self._live.stop()
             self._live = None
         self._keys.__exit__()
 
+    def _draw_loop(self) -> None:
+        size = self.console.size
+        while self._running:
+            self._dirty.wait(timeout=0.25)        # wake up now and then to notice terminal resizes
+            if not self._running:
+                break
+            new_size = self.console.size
+            if not self._dirty.is_set() and new_size == size:
+                continue
+            size = new_size
+            self._dirty.clear()
+            try:
+                self._live.refresh()
+            except Exception:                     # game state changed mid-render: just draw again
+                self._dirty.set()
+            time.sleep(1 / MAX_FPS)
+
     # output
     def log(self, message: str) -> None:
-        self.refresh()   # registers any card that just arrived, so its log line can wait for the flip
+        self._register_new_cards()   # so a hit's log line can wait for its card to flip
         if self._held_log or time.monotonic() < self._anim_until:
             self._held_log.append(message)
         else:
@@ -686,22 +718,30 @@ class RichUI(BaseUI):
 
     def refresh(self) -> None:
         if self._live:
-            self._live.refresh()
+            self._dirty.set()
 
     def pause(self, seconds: float) -> None:
         end = time.monotonic() + (seconds or 0)
+        self._register_new_cards()
         self.refresh()
         end = max(end, self._anim_until)   # always let a hit animation finish
         while (now := time.monotonic()) < end:
             if now < self._anim_until:
                 time.sleep(min(1 / ANIM_FPS, end - now))
-                self.refresh()
             else:
-                self.refresh()
                 time.sleep(end - now)
-        self.refresh()
+            self.refresh()
 
     # hit animation
+    def _register_new_cards(self) -> None:
+        '''Start the animation clock for any card just hit onto a hand (without drawing).'''
+        game = self.game
+        if not self.animate or game is None:
+            return
+        for player in [*getattr(game, "seats", []), game.dealer]:
+            for hand in player.hands:
+                self._card_age(hand.cards)
+
     def _card_age(self, cards: Sequence) -> Optional[float]:
         '''Seconds since the newest card in a hand appeared, while it is still animating.'''
         if not self.animate or len(cards) < 3:     # the initial two-card deal isn't animated
