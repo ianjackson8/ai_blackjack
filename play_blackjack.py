@@ -21,6 +21,7 @@ from collections import deque
 from itertools import count as _counter
 from typing import List, Optional, Union
 from datetime import datetime
+from pathlib import Path
 
 from counter import BASE_EDGE, bet_units, load_counter, make_tracker, save_counter, train_counter, evaluate_counter
 from strategy import basic_strategy
@@ -37,7 +38,13 @@ GOD_MODE = False
 
 NULL_UI = HeadlessUI(verbose=False)
 
-SETTINGS_FILE = 'game_settings.json'
+# Every file the game reads or writes lives next to this file, wherever it's launched from
+# (Terminal Casino runs games from its own directory).
+HERE = Path(__file__).resolve().parent
+SETTINGS_FILE = str(HERE / 'game_settings.json')
+MODELS_DIR = HERE / "models"
+SAVES_DIR = HERE / "saves"
+LOGS_DIR = HERE / "logs"
 BOT_STRATEGIES = ["by the books", "default", "ai-nn", "counter", "counter-hilo"]
 
 # Fields shown in the in-game settings editor (bots are edited separately)
@@ -383,7 +390,7 @@ class Bot(Player):
             raise ValueError(f"Invalid bot strategy: {self.strategy}.")
 
 
-COUNTER_MODEL_PATH = "models/card_counter_lstm.pth"
+COUNTER_MODEL_PATH = str(MODELS_DIR / "card_counter_lstm.pth")
 # strategy name -> how the bot tracks the shoe ("counter" is the LSTM; the others are for comparison)
 COUNTER_TRACKERS = {"counter": "lstm", "counter-hilo": "hi-lo", "counter-perfect": "perfect", "counter-flat": "flat"}
 
@@ -525,7 +532,7 @@ class BlackjackGame:
         if any(b.get('strategy') == 'counter' for b in bot_info):
             try:
                 self.counter_model = load_counter(COUNTER_MODEL_PATH)
-                self.ui.log(f"[grey50]Card-counter LSTM loaded from {COUNTER_MODEL_PATH}[/]")
+                self.ui.log(f"[grey50]Card-counter LSTM loaded from {rel(COUNTER_MODEL_PATH)}[/]")
             except (FileNotFoundError, ValueError):
                 self.ui.log("[yellow]No card-counter model yet — counter bots bet flat. "
                             "Train one with: python3 play_blackjack.py --train-counter[/]")
@@ -554,16 +561,13 @@ class BlackjackGame:
             # seats new since the save (e.g. a bot added in settings) start a fresh history
             self.balance_history.setdefault(seat.name, [seat.balance])
 
-        if not os.path.exists("models"):
-            os.makedirs("models")
-        if not os.path.exists("saves"):
-            os.makedirs("saves")
+        MODELS_DIR.mkdir(exist_ok=True)
 
         for bot in self.bots:
             if isinstance(bot, TrainableBot):
                 try:
                     bot_name = bot.name.replace(" ", "_")
-                    additional_data = bot.load(f"models/{bot_name}_model.pth", log=self.ui.log)
+                    additional_data = bot.load(model_path(bot.name), log=self.ui.log)
                     bot.epsilon = saved_bot_epsilons.get(bot.name, additional_data.get("epsilon", 1.0))
                 except FileNotFoundError:
                     self.ui.log(f"[cyan]No saved model for {esc(bot.name)} — starting fresh.[/]")
@@ -987,7 +991,7 @@ class BlackjackGame:
     def save_models(self) -> None:
         for bot in self.bots:
             if isinstance(bot, TrainableBot):
-                bot.save(f"models/{bot.name.replace(' ', '_')}_model.pth", log=self.ui.log)
+                bot.save(model_path(bot.name), log=self.ui.log)
 
     def end_game(self):
         self.phase = "over"
@@ -1039,7 +1043,8 @@ class BlackjackGame:
 
     def save_game(self, save_name: str) -> str:
         save_name = save_name.strip().replace(".json", "")
-        save_path = f"saves/{save_name}.json"
+        SAVES_DIR.mkdir(exist_ok=True)
+        save_path = str(SAVES_DIR / f"{save_name}.json")
 
         save_data = {
             "saved_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
@@ -1060,7 +1065,7 @@ class BlackjackGame:
         with open(save_path, 'w') as f:
             json.dump(save_data, f, indent=4)
 
-        msg = f"Saved to {save_path} — load with: python3 play_blackjack.py --load {save_name}"
+        msg = f"Saved to {rel(save_path)} — load with: python3 play_blackjack.py --load {save_name}"
         self.ui.log(f"[green]{esc(msg)}[/]")
         return msg
 
@@ -1363,7 +1368,7 @@ class TrainableBot(Player):
             "additional_data": {"epsilon": self.epsilon, "train_steps": self.train_steps},
         }, file_path)
         if log:
-            log(f"[grey50]Model saved to {esc(file_path)}[/]")
+            log(f"[grey50]Model saved to {esc(rel(file_path))}[/]")
 
     def load(self, file_path: str, log=None) -> dict:
         '''Load a checkpoint. Raises FileNotFoundError, or ValueError for an older architecture.'''
@@ -1378,11 +1383,33 @@ class TrainableBot(Player):
         extra = checkpoint.get("additional_data", {})
         self.train_steps = extra.get("train_steps", 0)
         if log:
-            log(f"[grey50]Model loaded from {esc(file_path)}[/]")
+            log(f"[grey50]Model loaded from {esc(rel(file_path))}[/]")
         return extra
 
 
 #== Functions ==#
+
+def rel(path) -> str:
+    '''A path as shown to the player: relative to the game folder when it's inside it.'''
+    try:
+        return str(Path(path).resolve().relative_to(HERE))
+    except ValueError:
+        return str(path)
+
+
+def model_path(bot_name: str) -> str:
+    return str(MODELS_DIR / f"{bot_name.replace(' ', '_')}_model.pth")
+
+
+def new_log_file() -> str:
+    '''Path for this session's log (created now if logging is on).'''
+    if not LOG_GAME:
+        return str(LOGS_DIR / "session_NULL.json")
+    LOGS_DIR.mkdir(exist_ok=True)
+    log_file = LOGS_DIR / f'session_{datetime.now().strftime("%Y-%m-%d_%H%M%S")}.json'
+    log_file.write_text("[]")
+    return str(log_file)
+
 
 def get_card_value(card_str: str) -> int:
     rank = card_str.split(" ")[0]
@@ -1405,7 +1432,7 @@ def parse_log_and_plot(log_file, block=True, log=print):
         log(f"Failed to parse log file {log_file}.")
         return
 
-    with open('game_settings.json', 'r') as file:
+    with open(SETTINGS_FILE, 'r') as file:
         settings = json.load(file)
 
     try:
@@ -1525,14 +1552,14 @@ def main():
     args = parser.parse_args()
 
     if args.train_counter is not None:
-        os.makedirs("models", exist_ok=True)
+        MODELS_DIR.mkdir(exist_ok=True)
         print(f"Training the card-counting LSTM for {args.train_counter:,} steps on simulated shoes…")
         model = train_counter(steps=args.train_counter)
         save_counter(model, COUNTER_MODEL_PATH)
         print("Average true-count error by shoe size (lower is better):")
         for decks in (1, 2, 6, 8):
             print(f"  {decks} deck{'s' if decks > 1 else ' '}: {evaluate_counter(model, shoes=20, decks=decks):.2f}")
-        print(f"Saved to {COUNTER_MODEL_PATH}")
+        print(f"Saved to {rel(COUNTER_MODEL_PATH)}")
         return
 
     with open(SETTINGS_FILE, 'r') as file:
@@ -1551,13 +1578,13 @@ def main():
     save_data = None
     if args.load:
         save_name = args.load.replace(".json", "")
-        save_path = f"saves/{save_name}.json"
+        save_path = str(SAVES_DIR / f"{save_name}.json")
         try:
             with open(save_path, 'r') as f:
                 save_data = json.load(f)
             ui.log(f"[green]Loaded save: {esc(save_name)}[/]")
         except FileNotFoundError:
-            print(f"Save file '{save_path}' not found.")
+            print(f"Save file '{rel(save_path)}' not found.")
             sys.exit(1)
 
     bj_game = None
@@ -1582,14 +1609,7 @@ def main():
             ui.log("[yellow]Balance graph needs game logging on — graph will be skipped.[/]")
             SHOW_GRAPH = False
 
-        if LOG_GAME:
-            if not os.path.exists("logs"):
-                os.mkdir("logs")
-            log_file = f'logs/session_{datetime.now().strftime("%Y-%m-%d_%H%M%S")}.json'
-            with open(log_file, 'w') as file:
-                file.write("[]")
-        else:
-            log_file = 'logs/session_NULL.json'
+        log_file = new_log_file()
 
         ui.animate = bool(settings.get("animate_cards", True)) and not TRAIN_MODE
         bj_game = BlackjackGame(

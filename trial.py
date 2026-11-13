@@ -201,8 +201,9 @@ def main():
         table.add_row(key, *(fmt(key, stats[n][key]) for n in names))
     console.print(table)
 
-    os.makedirs("results", exist_ok=True)
-    path = f"results/trial_seed{args.seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    results = pb.HERE / "results"
+    results.mkdir(exist_ok=True)
+    path = str(results / f"trial_seed{args.seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
     plot(result, path, f"Bot survival trial — ${args.bankroll:,.0f} each, no rebuys (seed {args.seed}) — {winner} wins")
     console.print(f"Graph saved to [bold]{path}[/]")
 
