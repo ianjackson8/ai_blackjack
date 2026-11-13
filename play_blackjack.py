@@ -1453,6 +1453,19 @@ def rel(path) -> str:
         return str(path)
 
 
+def game_version() -> str:
+    '''The release version, read from PLUGIN_META in plugin.py (the single source of truth).'''
+    import ast
+    try:
+        tree = ast.parse((HERE / "plugin.py").read_text())
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "PLUGIN_META" for t in node.targets):
+                return str(ast.literal_eval(node.value)["version"])
+    except (OSError, SyntaxError, ValueError, KeyError):
+        pass
+    return "?"
+
+
 def model_path(bot_name: str) -> str:
     return str(MODELS_DIR / f"{bot_name.replace(' ', '_')}_model.pth")
 
@@ -1670,6 +1683,7 @@ def main() -> int:
     TRAIN_MODE = args.train
 
     ui = make_ui(TRAIN_MODE, SHOW_OUTPUT)
+    ui.version = f"v{game_version()}"
 
     if TRAIN_MODE and not settings.get('bots'):
         print("Train mode requires at least one bot configured in game_settings.json.")

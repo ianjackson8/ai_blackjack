@@ -539,6 +539,7 @@ class BaseUI:
     def __init__(self):
         self.game = None
         self.splash_info = ""
+        self.version = ""         # shown on the splash screen, e.g. "v5.1.0"
         self.active_player = None
         self.active_hand: Optional[int] = None
 
@@ -1285,7 +1286,7 @@ class RichUI(BaseUI):
         logo_cards = [SimpleNamespace(rank="Ace", suit="Spades"), SimpleNamespace(rank="King", suit="Hearts")]
         logo = render_cards(logo_cards, width=40)
         title = Text("B L A C K J A C K", "bold gold1")
-        subtitle = Text("v5.0  ·  humans vs. bots vs. the house", "grey62")
+        subtitle = Text(f"{self.version}  ·  humans vs. bots vs. the house", "grey62")
         names = Table.grid(padding=(0, 2))
         names.add_column(style="gold1")
         names.add_column(style="bold")
