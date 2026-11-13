@@ -853,8 +853,15 @@ class BlackjackGame:
         if self.allow_insurance and self.dealer.hands[0].cards[1].rank == "Ace":
             self.offer_insurance()
 
+        # US rules: with an Ace or ten showing, the dealer peeks; a dealer blackjack ends the round
+        # before anyone acts, so players only ever lose their original bet to it
+        dealer_peeked_blackjack = self.dealer.hands[0].is_blackjack()
+        if dealer_peeked_blackjack:
+            self.ui.log("Dealer peeks… [bold red]Blackjack![/]")
+            self.ui.pause(self.deal_delay)
+
         for player in self.seats:
-            if player.current_bet > 0:
+            if player.current_bet > 0 and not dealer_peeked_blackjack:
                 if isinstance(player, (Bot, TrainableBot)):
                     player.play_turn(self.shoe, str(self.dealer.hands[0].cards[1]), self.deal_delay, ui=self.ui)
                 else:
@@ -1278,6 +1285,7 @@ class TrainableBot(Player):
             else:
                 self.memory.append((state, idx, 0.0, self.trajectory[t + 1][0], False))
         self.trajectory = []
+        self.doubled = False     # a round can end before the bot acts (dealer blackjack)
 
         if self.bet_state is not None and base_bet:
             self.bet_memory.append((self.bet_state, self.bet_action, net_change / base_bet))
