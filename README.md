@@ -5,29 +5,81 @@ Run the program
 python3 play_blackjack.py
 ```
 
+### Controls
+The game runs as a full-screen terminal UI with card art, a pile of casino chips for every bet (the bigger the bet, the bigger the pile; colours run red → green → black → purple → orange as bets grow) that animates as bets go in, winnings get paid and losing bets get swept away, a live table, and a side panel (on terminals 100+ columns wide) with:
+
+- **Scoreboard** — seats ranked by net result, balance sparkline, win %, current streak, biggest win of the session
+- **Bot Brains** — why each bot did what it did: the NN bot's Q-values for its bet and each hit/stand/double (and when it explored at random), Count Bot's live count, LSTM vs. real true count, tens+aces left and bet ramp, and the book/basic-strategy play for rule bots
+- **Table Talk** — the log of every action, under the brains when there's room; `Tab` switches to a full-height log and back
+
+| Key | Action |
+| --- | --- |
+| `H` / `1` | Hit |
+| `S` / `2` | Stand |
+| `D` / `3` | Double (only shown when allowed) |
+| `P` / `4` | Split (only shown when allowed) |
+| `Enter` | Accept the default: repeat your last bet, deal the next round |
+| `Esc` | Clear the text you're typing |
+| `Tab` | Switch the side panel between scoreboard/brains and the full log (works while bots play) |
+| `Ctrl-C` | Quit immediately |
+
+At the bet prompt, type an amount (`0` to sit out a round) or a `/command`.
+
 ## Training Mode
 Train the AI bot without human player interaction
 ```
 python3 play_blackjack.py --train
 ```
+Training plays `train_param.rounds` rounds (default 60,000 — about 2 minutes with `show_output` off; editable in the settings menu) with no deal delay. A bot that runs out of money rebuys for `init_balance` so it keeps learning, and `Ctrl-C` stops early and still saves the model. Set `show_output` to false for the fastest run.
+
+### Card-counting bot
+The `counter` bot plays basic strategy (including splits) and lets an LSTM count cards for it.
+The LSTM watches every card that is shown, predicts what is left in the shoe, and the bot raises its bet when the remaining cards favour the player.
+Train the LSTM once (about 2 minutes) before using it:
+```
+python3 play_blackjack.py --train-counter        # optional: --train-counter 12000 for more steps
+```
+Its seat shows the LSTM's true count and estimated edge; the log shows its count next to the real one whenever it raises.
+
+### How the AI bot works
+The `ai-nn` bot has two small neural networks:
+- **Play network** sees its hand total, whether the hand is soft, whether it can double, and the dealer's upcard, and picks hit / stand / double.
+- **Bet network** sees the Hi-Lo true count and how deep into the shoe we are, and picks a bet of 1×, 2×, 4×, 6× or 8× `default_bet`.
+
+## Bot Survival Trial
+Pit BTB Bot, NN Bot and Count Bot against each other: $500 each, no rebuys, out at $0, last one standing wins.
+Prints a stats table and saves a balance graph to `results/`.
+```
+python3 trial.py                  # one trial (seed 1)
+python3 trial.py --seed 7         # a different trial
+python3 trial.py --repeat 200     # plus 200 more trials to see who wins most often
+```
 
 ## Game Settings
+Settings can be changed in-game: on the player name screen press `Tab` (or type `/settings`) to open the settings editor.
+Use `↑`/`↓` to move, `Enter` to edit or toggle, `A`/`R`/`X` to add, rename or remove bots, `S` to save to `game_settings.json`, and `Esc` to cancel.
+
+They can also be edited directly in `game_settings.json`:
 - `num_decks` : \<int\>  number of decks to use in the shoe
 - `init_balance` : \<float\> initial balance of all players
 - `default_bet` : \<float\> default bet of bots
-- `show_output` : \<bool\> print to the terminal (true/false)
+- `show_output` : \<bool\> show the table UI during `--train` (false = a one-line progress counter, much faster)
 - `log_game` : \<bool\> save game information to a log file (true/false)
 - `show_graph` : \<bool\> show balance throughout play after quitting game (true/false)
 - `deal_delay` : \<float\> time to deal cards (set to 0 for no delay)
 - `allow_double_after_split`: \<bool\> allows the player to double on a split (true/false)
 - `split_limit`: \<int\> The amount of splits allowed for a player (set to -1 for no limit)
 - `allow_insurance`: \<bool\> offer insurance side-bet to human players when dealer shows Ace (true/false)
+- `train_param.rounds` : \<int\> rounds played by `--train`
+- `counter.max_spread` : \<int\> most a counter bot will bet, in units of `default_bet`
 - `bots` : \<List[dict]> information of bots to play alongside player
   - `name` : \<str\> name of the bot
   - `strategy` : \<str\> playing strategy (options below)
     - "default" - hits on anything below 17, stands otherwise
     - "by the books" - plays based on best odds table
-    - "ai-nn" - trainable reinforcement learning bot using Q-learning
+    - "ai-nn" - trainable reinforcement learning bot using Q-learning (also sizes its own bets from the card count)
+    - "counter" - plays perfect basic strategy and sizes bets with an LSTM card counter (see below)
+    - "counter-hilo" - same, but counts with the classic Hi-Lo system (handy for comparison)
 
 > **Note:** `show_graph` requires `log_game: true`. If `log_game` is false, the graph will be skipped with a warning at startup.
 
@@ -55,15 +107,26 @@ Player balances, bot balances, AI training state (epsilon), and balance history 
 - `/save [name]` - save the current game state
 
 ## AI Bot
-The AI bot uses reinforcement learning (Q-learning) to learn optimal blackjack strategy:
-- **Neural Network**: 3-layer network (128→64→3 neurons) that learns Q-values for actions
-- **Actions**: hit, stand, double
-- **Epsilon-greedy**: Starts exploring randomly (ε=1.0), gradually exploits learned strategy (ε→0.01)
-- **Experience Replay**: Learns from stored game experiences in batches
-- **Reward System**: +1.5 for blackjack, +1.0 for win, 0 for push, -1.0 for loss/bust
-- **Model Persistence**: Saves/loads from `bot_model.pth` to continue learning across sessions
+The `ai-nn` bot uses deep Q-learning:
+- **Play network**: `[hand total, soft, can double, dealer upcard]` → 64 → 32 → Q-values for hit / stand / double (doubling only allowed on two cards)
+- **Bet network**: `[Hi-Lo true count, shoe penetration]` → 32 → 16 → Q-values for betting 1×, 2×, 4×, 6× or 8× `default_bet`
+- **Rewards**: the hand's result in units of its stake (blackjack +1.5, win +1, push 0, lose/bust −1, doubled hands count twice), credited back through every decision in the hand
+- **Training**: ε-greedy exploration, experience replay, a target network, Smooth L1 loss
+- **Model persistence**: saved to `models/{bot_name}_model.pth`; models from older versions are rejected and retrained from scratch
 
 # Changelog
+- v5.0
+  - full-screen Rich TUI: card art, seat panels, key-driven prompts (`H`/`S`/`D`/`P`), session summary on exit
+  - hit animation: cards slide in face down and flip; totals and log lines wait for the flip (`animate_cards` setting)
+  - chip piles that grow with the bet, with animations for betting, doubling, payouts and losing bets
+  - side panel with a session scoreboard (sparklines, streaks, biggest win) and "Bot Brains" showing each bot's reasoning; `Tab` toggles the full log
+  - in-game settings editor (`Tab` / `/settings` on the name screen)
+  - rework the `ai-nn` bot: correct doubling rewards, credit across multi-step hands, soft-hand and can-double features, and a bet-sizing network driven by the true count; retrained from scratch
+  - add `counter` bot: basic strategy plus an LSTM that learns to count cards from simulated shoes (`--train-counter`) and ramps bets with the estimated edge
+  - add `trial.py`: bot survival trial with balance graph and stats table
+  - redraw the screen only when something changes (was a full repaint 8×/s); faster startup
+  - fix the shoe running out mid-round, bots looping on an unaffordable double, and `insurance_bet` not being initialised
+  - fix payouts: 21 after a split pays 1:1 (only a two-card 21 on an unsplit hand is a blackjack), blackjack vs dealer blackjack pushes, and a dealer blackjack beats a multi-card 21
 - v4.0
   - add insurance side-bet — offered to human players when dealer shows Ace; pays 2:1; toggleable via `allow_insurance` in settings
   - add `/stats` command — shows W/L/Push/BJ counts, net P&L, win rate, and best/worst round for all players; also printed automatically at end of session

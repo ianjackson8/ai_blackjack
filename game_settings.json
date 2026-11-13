@@ -6,20 +6,24 @@
     "log_game": true,
     "show_graph": true,
     "deal_delay": 1.5,
+    "animate_cards": true,
     "allow_double_after_split": true,
     "split_limit": -1,
     "allow_insurance": true,
-    "bots" : [
-        {
-            "name": "BTB Bot",
-            "strategy": "by the books"
-        },
+    "bots": [
         {
             "name": "NN Bot",
             "strategy": "ai-nn"
+        },
+        {
+            "name": "Count Bot",
+            "strategy": "counter"
         }
     ],
-    "train_param" : {
-        "epochs" : 100
+    "train_param": {
+        "rounds": 60000
+    },
+    "counter": {
+        "max_spread": 8
     }
 }
