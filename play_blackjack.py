@@ -534,6 +534,11 @@ class BlackjackGame:
         self.allow_insurance = allow_insurance
         self.phase = "betting"
         self.plugin_mode = PLUGIN_MODE
+        # Terminal Casino table (plugin mode only): name and betting limits; None = no limit
+        self.table_name: Optional[str] = None
+        self.min_bet: Optional[float] = None
+        self.max_bet: Optional[float] = None
+        self.leave_reason: Optional[str] = None
 
         saved_player_balances = {}
         saved_bot_balances = {}
@@ -837,6 +842,7 @@ class BlackjackGame:
         self.ui.set_active(player)
         while True:
             suggested = player.last_bet if 0 < player.last_bet <= player.balance else min(DEFAULT_BET, player.balance)
+            suggested = self._within_limits(suggested, player.balance)
             if self.plugin_mode:
                 raw = self.ui.ask(
                     f"[bold]{esc(player.name)}[/] ([green]{money(player.balance)}[/]) — place your bet, 0 to sit out  "
@@ -859,6 +865,12 @@ class BlackjackGame:
             if bet == 0:
                 self.ui.log(f"[grey62]{esc(player.name)} sits out this round[/]")
                 return
+            if self.min_bet is not None and bet < self.min_bet:
+                self.ui.error(f"Table minimum is {money(self.min_bet)}.")
+                continue
+            if self.max_bet is not None and bet > self.max_bet:
+                self.ui.error(f"Table maximum is {money(self.max_bet)}.")
+                continue
             try:
                 player.place_bet(bet)
             except ValueError as e:
@@ -867,6 +879,19 @@ class BlackjackGame:
             player.last_bet = bet
             self.ui.log(f"[green3]{esc(player.name)}[/] bets {money(bet)}")
             return
+
+    def _within_limits(self, amount, balance):
+        '''Clamp a suggested bet to the table limits (plugin mode) and the balance.'''
+        if self.min_bet is not None:
+            amount = max(amount, self.min_bet)
+        if self.max_bet is not None:
+            amount = min(amount, self.max_bet)
+        return min(amount, balance)
+
+    def table_limits(self) -> str:
+        '''"$100–$5,000", or "$5+" with no maximum.'''
+        low = money(self.min_bet or 0)
+        return f"{low}–{money(self.max_bet)}" if self.max_bet is not None else f"{low}+"
 
     def play_round(self) -> None:
         self.check_shoe()
@@ -955,6 +980,11 @@ class BlackjackGame:
     def _round_loop(self) -> None:
         leave = (("l", "q", "esc"), "n", "Leave table") if self.plugin_mode else ("nq", "n", "Quit")
         while True:
+            if self.plugin_mode and self.min_bet is not None and self.players[0].balance < self.min_bet:
+                self.leave_reason = (f"{money(self.players[0].balance)} doesn't cover the "
+                                     f"{money(self.min_bet)} table minimum")
+                self.ui.log(f"[yellow]{esc(self.leave_reason)} — leaving the table.[/]")
+                break
             if TRAIN_MODE:
                 if not self.bots or self.game_num >= self.train_until:
                     break
@@ -1036,7 +1066,8 @@ class BlackjackGame:
         if self.plugin_mode:
             # the casino takes the terminal straight back, so the summary has to be shown in our UI
             self.ui.set_overlay(f"Session Summary — {self.game_num} rounds", stats_table(self))
-            self.ui.wait_key("Press any key to return to the casino")
+            reason = f"[yellow]{esc(self.leave_reason)}.[/]  " if self.leave_reason else ""
+            self.ui.wait_key(f"{reason}Press any key to return to the casino")
             self.ui.clear_overlay()
             self.ui.stop()
             return
@@ -1077,7 +1108,8 @@ class BlackjackGame:
         '''The table's rules as (rule, detail) rows, from the current settings.'''
         decks = f"{self.num_decks} deck{'s' if self.num_decks != 1 else ''}"
         splits = "no limit" if self.split_limit == -1 else f"up to {self.split_limit} time{'s' if self.split_limit != 1 else ''}"
-        return [
+        table = [("Table", f"{self.table_name} · bets {self.table_limits()}")] if self.table_name else []
+        return table + [
             ("Goal", "Get closer to 21 than the dealer without going over"),
             ("Shoe", f"{decks}, reshuffled near the end"),
             ("Blackjack", "An Ace and a ten-card on your first two cards pays 3:2"),
@@ -1636,15 +1668,34 @@ def make_ui(train_mode: bool, show_output: bool):
 
 
 #== Terminal Casino ==#
-def play_as_plugin(player_name: str, balance: float) -> float:
+def apply_table_rules(settings: dict, rules: dict) -> dict:
+    '''
+    Settings for one casino visit: this folder's game_settings.json with the table's rules on top
+    (the rules declared in plugin.py's PLUGIN_META["rules"]). Returns a copy; nothing is written back.
+    '''
+    merged = dict(settings)
+    if "num_decks" in rules:
+        merged["num_decks"] = int(rules["num_decks"])
+    if "allow_double_after_split" in rules:
+        merged["allow_double_after_split"] = bool(rules["allow_double_after_split"])
+    if "allow_insurance" in rules:
+        merged["allow_insurance"] = bool(rules["allow_insurance"])
+    if "split_limit" in rules:
+        merged["split_limit"] = -1 if rules["split_limit"] == "unlimited" else int(rules["split_limit"])
+    return merged
+
+
+def play_as_plugin(player_name: str, balance: float, table: Optional[dict] = None) -> float:
     '''
     Run one visit to the table for Terminal Casino and return the player's balance when they leave.
-    Single seat, no bots; game rules come from this folder's game_settings.json. Never exits the
-    process, and always gives the terminal back.
+    Single seat, no bots. Rules come from this folder's game_settings.json, overridden for this visit
+    by the casino table's rules; the table's min/max bet are enforced. Never exits the process, and
+    always gives the terminal back.
     '''
     global PLUGIN_MODE, TRAIN_MODE, GOD_MODE, SHOW_GRAPH
     with open(SETTINGS_FILE, 'r') as file:
         settings = json.load(file)
+    settings = apply_table_rules(settings, (table or {}).get("rules") or {})
     apply_settings(settings)
     PLUGIN_MODE, TRAIN_MODE, GOD_MODE, SHOW_GRAPH = True, False, False, False   # fresh state every visit
 
@@ -1665,6 +1716,10 @@ def play_as_plugin(player_name: str, balance: float) -> float:
             allow_insurance=settings.get('allow_insurance', True),
             ui=ui,
         )
+        if table is not None:
+            game.table_name = table.get("name") or "Blackjack"
+            game.min_bet = float(table["min_bet"]) if table.get("min_bet") is not None else None
+            game.max_bet = float(table["max_bet"]) if table.get("max_bet") is not None else None
         game.play_game()
         return max(0.0, float(game.players[0].balance))
     except (KeyboardInterrupt, EOFError):

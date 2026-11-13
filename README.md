@@ -62,13 +62,21 @@ Add it to the casino as `plugins/ai_blackjack` (git submodule or a copy) and it 
 At the casino the game runs in *plugin mode*:
 - one seat for the casino player, no bots
 - the casino's wallet is the bankroll; the game's `init_balance` isn't used
-- `Esc` (or `/leave`) at the bet prompt, or `L`/`Q`/`Esc` after a round, leaves the table and returns the balance; `?` shows the commands
+- `Esc` (or `/leave`) at the bet prompt, or `L`/`Q`/`Esc` after a round, leaves the table and returns the balance; `?` shows the table's rules and the commands
 - money/persistence commands are off (`/editbalance`, `/godmode`, `/save`, `/load`, `/graph`), and there's no save prompt or graph on exit
 - `Ctrl-C` leaves too: bets for a round that hasn't been dealt are returned, a hand already in play is forfeited
-- rules still come from this folder's `game_settings.json`
+- **tables**: the casino can run several blackjack tables (e.g. a $5 table, a High Roller, a single-deck table). Each table's minimum and maximum bet are enforced, and its rules override this folder's `game_settings.json` for that visit (never written back). If you can't cover a table's minimum, the visit ends. The header shows the table, e.g. `High Roller · $100–$5,000`. Rules a table can set (declared in `plugin.py`):
+
+  | Rule | Values | Default |
+  | --- | --- | --- |
+  | `num_decks` | 1–8 | 7 |
+  | `allow_double_after_split` | true / false | true |
+  | `split_limit` | `unlimited`, `1`, `2`, `3` | `unlimited` |
+  | `allow_insurance` | true / false | true |
 
 Running `python3 play_blackjack.py` directly is unchanged.
 
+## Game Settings
 Settings can be changed in-game: on the player name screen press `Tab` (or type `/settings`) to open the settings editor.
 Use `↑`/`↓` to move, `Enter` to edit or toggle, `A`/`R`/`X` to add, rename or remove bots, `S` to save to `game_settings.json`, and `Esc` to cancel.
 
