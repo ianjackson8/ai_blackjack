@@ -549,12 +549,10 @@ class BlackjackGame:
         self.round_data = {}
         self.game_num = save_data["rounds_played"] if save_data else 0
 
-        if save_data and "balance_history" in save_data:
-            self.balance_history = save_data["balance_history"]
-        else:
-            self.balance_history = {p.name: [p.balance] for p in self.players}
-            for bot in self.bots:
-                self.balance_history[bot.name] = [bot.balance]
+        self.balance_history = dict(save_data.get("balance_history", {})) if save_data else {}
+        for seat in self.players + self.bots:
+            # seats new since the save (e.g. a bot added in settings) start a fresh history
+            self.balance_history.setdefault(seat.name, [seat.balance])
 
         if not os.path.exists("models"):
             os.makedirs("models")
