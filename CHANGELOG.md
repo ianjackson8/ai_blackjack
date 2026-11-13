@@ -2,6 +2,9 @@
 
 One entry per release. The newest entry matches `PLUGIN_META["version"]` in `plugin.py` and the release's git tag (`v` + version, e.g. `v5.1.0`).
 
+- v5.2
+  - Terminal Casino tables: `run()` takes the casino's `table`; its min/max bet are enforced, its rules (decks, double after split, splits per hand, insurance) override `game_settings.json` for the visit, and the header shows the table name and limits. The visit ends if the player can't cover the table minimum.
+  - `PLUGIN_META["rules"]` declares the four table rules
 - v5.1
   - dealer peeks for blackjack with an Ace or ten showing: a dealer natural ends the round before anyone acts, so you only lose your original bet (#30)
   - fix crash loading a save after bots were added in settings (#29)
@@ -9,6 +12,9 @@ One entry per release. The newest entry matches `PLUGIN_META["version"]` in `plu
   - player names can no longer match a bot's name (#32)
   - Terminal Casino support: `plugin.py` adapter and a plugin mode (single seat, leave-table key, no money-changing commands)
   - all files (settings, models, saves, logs) are found relative to the game folder, so it can be launched from anywhere
+  - at the casino, `?` shows the table rules as well as the commands
+  - modules renamed `bj_tui`, `bj_strategy`, `bj_counter`; `sys.exit` only from `__main__`; changelog moved to `CHANGELOG.md`
+  - the splash screen shows the real version (read from `PLUGIN_META`)
 - v5.0
   - full-screen Rich TUI: card art, seat panels, key-driven prompts (`H`/`S`/`D`/`P`), session summary on exit
   - hit animation: cards slide in face down and flip; totals and log lines wait for the flip (`animate_cards` setting)

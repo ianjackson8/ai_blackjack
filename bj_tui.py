@@ -1235,7 +1235,9 @@ class RichUI(BaseUI):
         if game is not None:
             total = game.num_decks * 52
             if getattr(game, "plugin_mode", False) and game.players:
-                # at the casino the header carries the player's wallet, like the other tables
+                # at the casino the header carries the table and the player's wallet, like the other games
+                if getattr(game, "table_name", None):
+                    info.append(f"{game.table_name} · {game.table_limits()}   ", "gold1")
                 you = game.players[0]
                 info.append(f"{you.name}   ", "bold")
                 info.append(f"{money(you.balance)}   ", "bold green")
