@@ -107,15 +107,25 @@ Player balances, bot balances, AI training state (epsilon), and balance history 
 - `/save [name]` - save the current game state
 
 ## AI Bot
-The AI bot uses reinforcement learning (Q-learning) to learn optimal blackjack strategy:
-- **Neural Network**: 3-layer network (128→64→3 neurons) that learns Q-values for actions
-- **Actions**: hit, stand, double
-- **Epsilon-greedy**: Starts exploring randomly (ε=1.0), gradually exploits learned strategy (ε→0.01)
-- **Experience Replay**: Learns from stored game experiences in batches
-- **Reward System**: +1.5 for blackjack, +1.0 for win, 0 for push, -1.0 for loss/bust
-- **Model Persistence**: Saves/loads from `bot_model.pth` to continue learning across sessions
+The `ai-nn` bot uses deep Q-learning:
+- **Play network**: `[hand total, soft, can double, dealer upcard]` → 64 → 32 → Q-values for hit / stand / double (doubling only allowed on two cards)
+- **Bet network**: `[Hi-Lo true count, shoe penetration]` → 32 → 16 → Q-values for betting 1×, 2×, 4×, 6× or 8× `default_bet`
+- **Rewards**: the hand's result in units of its stake (blackjack +1.5, win +1, push 0, lose/bust −1, doubled hands count twice), credited back through every decision in the hand
+- **Training**: ε-greedy exploration, experience replay, a target network, Smooth L1 loss
+- **Model persistence**: saved to `models/{bot_name}_model.pth`; models from older versions are rejected and retrained from scratch
 
 # Changelog
+- v5.0
+  - full-screen Rich TUI: card art, seat panels, key-driven prompts (`H`/`S`/`D`/`P`), session summary on exit
+  - hit animation: cards slide in face down and flip; totals and log lines wait for the flip (`animate_cards` setting)
+  - chip piles that grow with the bet, with animations for betting, doubling, payouts and losing bets
+  - side panel with a session scoreboard (sparklines, streaks, biggest win) and "Bot Brains" showing each bot's reasoning; `Tab` toggles the full log
+  - in-game settings editor (`Tab` / `/settings` on the name screen)
+  - rework the `ai-nn` bot: correct doubling rewards, credit across multi-step hands, soft-hand and can-double features, and a bet-sizing network driven by the true count; retrained from scratch
+  - add `counter` bot: basic strategy plus an LSTM that learns to count cards from simulated shoes (`--train-counter`) and ramps bets with the estimated edge
+  - add `trial.py`: bot survival trial with balance graph and stats table
+  - redraw the screen only when something changes (was a full repaint 8×/s); faster startup
+  - fix the shoe running out mid-round, bots looping on an unaffordable double, and `insurance_bet` not being initialised
 - v4.0
   - add insurance side-bet — offered to human players when dealer shows Ace; pays 2:1; toggleable via `allow_insurance` in settings
   - add `/stats` command — shows W/L/Push/BJ counts, net P&L, win rate, and best/worst round for all players; also printed automatically at end of session
