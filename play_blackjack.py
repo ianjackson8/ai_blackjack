@@ -93,6 +93,10 @@ CASINO_DISABLED = {"editbalance", "godmode", "save", "load", "graph"}
 class LeaveTable(Exception):
     '''Raised from deep inside a round (plugin mode) to leave the table.'''
 
+
+class QuitGame(Exception):
+    '''Standalone /exit: the game has been wrapped up; main() ends the program.'''
+
 #== Classes ==#
 
 class Card:
@@ -1134,7 +1138,7 @@ class BlackjackGame:
         elif name == 'exit':
             self.refund_unplayed_bets()
             self.end_game()
-            sys.exit(0)
+            raise QuitGame()
 
         elif name == 'stats':
             self.print_stats()
@@ -1638,7 +1642,8 @@ def play_as_plugin(player_name: str, balance: float) -> float:
 
 
 #== Main ==#
-def main():
+def main() -> int:
+    '''Standalone entry point. Returns the process exit code (never calls sys.exit itself).'''
     parser = argparse.ArgumentParser()
     parser.add_argument("--train", action='store_true', help="Train AI mode — no player interaction")
     parser.add_argument("--load", type=str, default=None, help="Load a saved game by save name")
@@ -1655,7 +1660,7 @@ def main():
         for decks in (1, 2, 6, 8):
             print(f"  {decks} deck{'s' if decks > 1 else ' '}: {evaluate_counter(model, shoes=20, decks=decks):.2f}")
         print(f"Saved to {rel(COUNTER_MODEL_PATH)}")
-        return
+        return 0
 
     with open(SETTINGS_FILE, 'r') as file:
         settings = json.load(file)
@@ -1668,7 +1673,7 @@ def main():
 
     if TRAIN_MODE and not settings.get('bots'):
         print("Train mode requires at least one bot configured in game_settings.json.")
-        sys.exit(1)
+        return 1
 
     save_data = None
     if args.load:
@@ -1680,7 +1685,7 @@ def main():
             ui.log(f"[green]Loaded save: {esc(save_name)}[/]")
         except FileNotFoundError:
             print(f"Save file '{rel(save_path)}' not found.")
-            sys.exit(1)
+            return 1
 
     bj_game = None
     try:
@@ -1693,7 +1698,7 @@ def main():
                 ui.stop()
                 print(f"Can't load: player {', '.join(clashes)} has the same name as a bot in {SETTINGS_FILE}. "
                       "Rename the bot in settings first.")
-                sys.exit(1)
+                return 1
         elif TRAIN_MODE:
             players = []
         else:
@@ -1728,6 +1733,8 @@ def main():
             ui.log(f"[bold]Training for {rounds:,} rounds[/] (deal delay off)")
 
         bj_game.play_game()
+    except QuitGame:
+        pass
     except (KeyboardInterrupt, EOFError):
         ui.stop()
         if TRAIN_MODE and bj_game is not None:
@@ -1736,10 +1743,11 @@ def main():
             print(f"\nTraining stopped after {bj_game.game_num:,} rounds — models saved.")
         else:
             print("\nGame interrupted — progress since the last save was not kept.")
-        sys.exit(130)
+        return 130
     finally:
         ui.stop()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
