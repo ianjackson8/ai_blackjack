@@ -2,6 +2,16 @@
 
 One entry per release. The newest entry matches `PLUGIN_META["version"]` in `plugin.py` and the release's git tag (`v` + version, e.g. `v5.1.0`).
 
+- v5.3
+  - multi-hand: play up to 3 hands at once against one dealer, each with its own bet (`max_hands` setting / table rule, default 1). Hands sit side by side on the table, and each one doubles, splits and gets its own result; the split limit counts per hand
+  - side bets, each switched on separately with its own per-hand min and max:
+    - **Perfect Pairs**: your first two cards are a pair. Mixed 6:1, colored 12:1, perfect 25:1
+    - **21+3**: your two cards plus the dealer's up card as a poker hand. Flush 5:1, straight 10:1, three of a kind 30:1, straight flush 40:1, suited trips 100:1
+    - settled on the deal, shown under each hand, listed in the `?` rules, and totalled in the session summary
+  - Terminal Casino: seven new table rules (`max_hands`, `perfect_pairs`, `perfect_pairs_min`, `perfect_pairs_max`, `twenty_one_plus_three`, `twenty_one_plus_three_min`, `twenty_one_plus_three_max`); their defaults leave existing tables unchanged
+  - the settings editor gains the new settings, and number settings can now have a maximum
+  - a refused double (can't afford it, or after a hit) no longer draws and throws away a card (#34)
+  - game logs record each hand's bet and side bets, and which hand each action was on
 - v5.2
   - Terminal Casino tables: `run()` takes the casino's `table`; its min/max bet are enforced, its rules (decks, double after split, splits per hand, insurance) override `game_settings.json` for the visit, and the header shows the table name and limits. The visit ends if the player can't cover the table minimum.
   - `PLUGIN_META["rules"]` declares the four table rules

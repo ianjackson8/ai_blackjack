@@ -13,7 +13,7 @@ PLUGIN_META = {
     "name": "Blackjack",
     "description": "Beat the dealer to 21. Blackjack pays 3:2.",
     "min_bet": 1.0,
-    "version": "5.2.0",
+    "version": "5.3.0",
     "author": "Ian Jackson",
     # Table rules the casino can set per table (GAME_SPEC §3.5). Defaults match game_settings.json.
     "rules": {
@@ -25,6 +25,20 @@ PLUGIN_META = {
                         "default": "unlimited", "description": "How many times a hand can be split"},
         "allow_insurance": {"type": "bool", "label": "Insurance", "default": True,
                             "description": "Offer insurance when the dealer shows an Ace"},
+        "max_hands": {"type": "int", "label": "Hands", "default": 1, "min": 1, "max": 3,
+                      "description": "Hands a player can play at once, each with its own bet"},
+        "perfect_pairs": {"type": "bool", "label": "Perfect Pairs", "default": False,
+                          "description": "Side bet: first two cards make a pair (6:1 to 25:1)"},
+        "perfect_pairs_min": {"type": "int", "label": "Perfect Pairs min", "default": 1, "min": 1, "max": 10000,
+                              "description": "Smallest Perfect Pairs bet per hand"},
+        "perfect_pairs_max": {"type": "int", "label": "Perfect Pairs max", "default": 100, "min": 1, "max": 10000,
+                              "description": "Largest Perfect Pairs bet per hand (raised to the min if lower)"},
+        "twenty_one_plus_three": {"type": "bool", "label": "21+3", "default": False,
+                                  "description": "Side bet: your 2 cards + dealer up card as a poker hand (5:1 to 100:1)"},
+        "twenty_one_plus_three_min": {"type": "int", "label": "21+3 min", "default": 1, "min": 1, "max": 10000,
+                                      "description": "Smallest 21+3 bet per hand"},
+        "twenty_one_plus_three_max": {"type": "int", "label": "21+3 max", "default": 100, "min": 1, "max": 10000,
+                                      "description": "Largest 21+3 bet per hand (raised to the min if lower)"},
     },
 }
 
