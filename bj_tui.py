@@ -114,6 +114,25 @@ def card_markup(card) -> str:
     return f"[{colour}]{short_rank(card)}{SUIT_SYMBOLS[card.suit]}[/]"
 
 
+def card_text(card) -> str:
+    '''Plain card label, e.g. "K♥" (for remote players' views and events).'''
+    return f"{short_rank(card)}{SUIT_SYMBOLS[card.suit]}"
+
+
+def seats_of(game) -> list:
+    '''Every seat in table order: humans, remote players, bots.'''
+    return list(getattr(game, "seats", None) or game.players + game.bots)
+
+
+def thinking(player) -> Optional[str]:
+    '''"thinking… 12s" while a remote player's decision is open.'''
+    ticket = getattr(player, "ticket", None)
+    if ticket is None:
+        return None
+    left = getattr(ticket, "seconds_left", None)
+    return f"thinking… {max(0, math.ceil(left))}s" if isinstance(left, (int, float)) else "thinking…"
+
+
 def hand_total(hand) -> Tuple[int, bool]:
     '''Return (value, is_soft) for a hand.'''
     hard = sum(min(c.values) for c in hand.cards)
@@ -523,17 +542,17 @@ def _stats_table(game, wide: bool = True) -> Table:
     for col in ("W", "L", "P", "Bust", "BJ"):
         table.add_column(col, justify="right")
     table.add_column("Win %", justify="right", no_wrap=True)
-    any_rebuys = any(getattr(p, "rebuys", 0) for p in game.players + game.bots)
+    any_rebuys = any(getattr(p, "rebuys", 0) for p in seats_of(game))
     if any_rebuys:
         table.add_column("Rebuys", justify="right", style="magenta")
-    any_side = any(getattr(p, "side_stats", {}).get("bets") for p in game.players + game.bots)
+    any_side = any(getattr(p, "side_stats", {}).get("bets") for p in seats_of(game))
     if any_side:
         table.add_column("Side bets", justify="right", no_wrap=True)
     if wide:
         table.add_column("Best", justify="right", style="green", no_wrap=True)
         table.add_column("Worst", justify="right", style="red", no_wrap=True)
 
-    for player in game.players + game.bots:
+    for player in seats_of(game):
         s = player.stats
         history = game.balance_history.get(player.name, [])
         init_bal = history[0] if history else player.balance
@@ -583,6 +602,7 @@ class BaseUI:
         self.version = ""         # shown on the splash screen, e.g. "v5.1.0"
         self.active_player = None
         self.active_hand: Optional[int] = None
+        self.on_idle = None       # called while waiting for a key (e.g. to show remote players' chat)
 
     # lifecycle
     def attach(self, game) -> None:
@@ -602,6 +622,11 @@ class BaseUI:
 
     def refresh(self) -> None:
         pass
+
+    def poll_key(self, seconds: float) -> Optional[str]:
+        '''Wait up to `seconds` for a keypress without blocking the game; None if there wasn't one.'''
+        time.sleep(min(seconds, 0.01))
+        return None
 
     def set_overlay(self, title: str, renderable) -> None:
         pass
@@ -818,7 +843,7 @@ def _streak(history: Sequence[float]) -> str:
 
 
 def scoreboard(game, width: int) -> Group:
-    seats = game.players + game.bots
+    seats = seats_of(game)
     start = getattr(game, "starting_balance", 0)
     rows = []
     for p in seats:
@@ -1189,6 +1214,10 @@ class RichUI(BaseUI):
     # input
     def _read(self) -> str:
         while True:
+            if not self._pending_keys and self.on_idle is not None:
+                while self._live and not self._keys.ready():    # idle: let the game show chat
+                    self.on_idle()
+                    time.sleep(0.1)
             key = self._pending_keys.popleft() if self._pending_keys else self._keys.read()
             self._flash = None
             if key == "tab" and self.game is not None:   # Tab flips the side panel during a game
@@ -1199,6 +1228,22 @@ class RichUI(BaseUI):
     def _cycle_side(self) -> None:
         self.side_view = SIDE_VIEWS[(SIDE_VIEWS.index(self.side_view) + 1) % len(SIDE_VIEWS)]
         self.refresh()
+
+    def poll_key(self, seconds: float) -> Optional[str]:
+        self.refresh()
+        end = time.monotonic() + seconds
+        while True:
+            if self._pending_keys:
+                return self._pending_keys.popleft()
+            if self._live and self._keys.ready():
+                key = self._keys.read()
+                if key == "tab" and self.game is not None:
+                    self._cycle_side()
+                elif key:
+                    return key
+            if time.monotonic() >= end:
+                return None
+            time.sleep(0.02)
 
     def _poll_keys(self) -> None:
         '''While bots play: handle Tab right away and keep other keys for the next prompt.'''
@@ -1301,7 +1346,7 @@ class RichUI(BaseUI):
         game = self.game
         inner = width - 4
         board = scoreboard(game, inner)
-        n_lines = 2 * len(game.players + game.bots) + 1
+        n_lines = 2 * len(seats_of(game)) + 1
         board_h = min(n_lines + 2, max(6, height // 2))
         brains = bot_brains(game)
         brains_h = sum(max(1, len(t.wrap(self.console, inner))) for t in brains) + 2
@@ -1356,7 +1401,14 @@ class RichUI(BaseUI):
             lines.append(line)
         elif self.active_player is not None and self.game is not None:
             who = "Dealer" if self.active_player is self.game.dealer else esc(self.active_player.name)
-            lines.append(Text.from_markup(f"[grey62]{who} is playing…[/]"))
+            busy = thinking(self.active_player)
+            if busy:
+                line = Text.from_markup(f"[magenta]{who}[/] is {busy}   ")
+                for keys, label in (("Esc", "Leave table"), ("?", "Rules")):
+                    line.append(f" {keys} ", "bold black on gold1").append(f" {label}  ", "bold")
+                lines.append(line)
+            else:
+                lines.append(Text.from_markup(f"[grey62]{who} is playing…[/]"))
         if not lines:
             lines.append(Text(""))
         return Panel(Group(*lines[-2:]), box=box.ROUNDED, border_style="grey42",
@@ -1385,8 +1437,10 @@ class RichUI(BaseUI):
     def _table(self, width: int, height: int):
         game = self.game
         reveal = getattr(game, "phase", "") in ("dealer", "results", "over")
-        seats = game.players + game.bots
-        cols = max(1, min(len(seats), (width - 4) // 24)) if seats else 1
+        seats = seats_of(game)
+        # seats can be narrower when nobody has several hands (e.g. you and three remote players at 80 columns)
+        seat_w = 24 if any(len(p.hands) > 1 for p in seats) else 19
+        cols = max(1, min(len(seats), (width - 4) // seat_w)) if seats else 1
         rows = -(-len(seats) // cols) if seats else 0
         col_w = (width - 4) // cols
         inner_w = col_w - 4
@@ -1539,6 +1593,7 @@ class RichUI(BaseUI):
         phase = getattr(game, "phase", "")
         is_active = player is self.active_player
         strategy = "ai-nn" if hasattr(player, "q_network") else getattr(player, "strategy", None)
+        remote = hasattr(player, "remote_id")
         sitting_out = player.current_bet == 0 and phase not in ("betting", "")
 
         title = Text(player.name, "bold")
@@ -1549,7 +1604,12 @@ class RichUI(BaseUI):
                 title.append("even", "grey70")
             else:
                 title.append(signed_money(delta), "bold green" if delta > 0 else "bold red")
-        subtitle = Text(strategy, "grey62") if strategy else None
+        busy = thinking(player)
+        # a remote player's countdown sits in the border, so it doesn't make the seat taller
+        subtitle = (Text(strategy, "grey62") if strategy else Text(busy, "bold magenta") if busy
+                    else Text("AI", "magenta") if remote else None)
+        if remote:
+            title.stylize("magenta", 0, len(player.name))
         info = Text()
         info.append(money(player.balance), "bold green")
         if len(player.hand_bets) > 1:
@@ -1573,7 +1633,8 @@ class RichUI(BaseUI):
             parts.append(self._hand_grid(player, inner_w,
                                          lambda i, w: self._hand_block(player, i, w, compact, stacks, is_active)))
 
-        border = "bold gold1" if is_active else ("grey35" if sitting_out else ("cyan" if strategy else "green3"))
+        border = "bold gold1" if is_active else ("grey35" if sitting_out else
+                                                 ("magenta" if remote else "cyan" if strategy else "green3"))
         return Panel(Group(*parts), title=title, title_align="left", subtitle=subtitle, subtitle_align="right",
                      border_style=border, box=box.ROUNDED, style="on #0b3d2e", padding=(0, 1))
 
