@@ -3,7 +3,7 @@
 Play blackjack in terminal
 
 Author: Ian Jackson
-Version v5.3
+Version v5.3.1
 '''
 
 import math
@@ -50,6 +50,8 @@ SETTINGS_FILE = str(HERE / 'game_settings.json')
 MODELS_DIR = HERE / "models"
 SAVES_DIR = HERE / "saves"
 LOGS_DIR = HERE / "logs"
+DEAL_BUDGET_S = 1.2    # longest the initial deal takes, however many hands are out
+SIDE_BET_BEAT_S = 0.3  # then a beat to see the side bets settle (deal + beat stays under ~1.5 s)
 MAX_HANDS = 3          # most hands (spots) one player can play at once
 BOT_STRATEGIES = ["by the books", "default", "ai-nn", "counter", "counter-hilo"]
 
@@ -674,7 +676,9 @@ class BlackjackGame:
         global GOD_MODE
         self.phase = "playing"
         in_play = [p for p in self.seats if p.current_bet > 0]
-        delay = min(self.deal_delay, 0.25)
+        # a routine beat (spec §5.5): however many hands are out, the whole deal fits in DEAL_BUDGET_S
+        cards = 2 * (sum(len(p.hands) for p in in_play) + 1)
+        delay = min(self.deal_delay, 0.25, DEAL_BUDGET_S / cards)
         for player in in_play:
             if GOD_MODE and not isinstance(player, (Bot, TrainableBot)):
                 for hand in player.hands:
@@ -686,9 +690,11 @@ class BlackjackGame:
                     continue
                 for hand in player.hands:
                     hand.add_card(self.shoe.draw_card())
-                    self.ui.pause(delay)
+                    if self.ui.pause(delay, skippable=True):
+                        delay = 0                   # any key deals the rest at once
             self.dealer.hit(self.shoe.draw_card())
-            self.ui.pause(delay)
+            if self.ui.pause(delay, skippable=True):
+                delay = 0
 
     def settle_side_bets(self) -> None:
         '''Side bets are decided by the deal alone, so they're paid (or taken) before anyone acts.'''
@@ -715,7 +721,7 @@ class BlackjackGame:
                         hand.side_results[key] = None
                         self.ui.log(f"{who} {info['label']} loses [red]-{money(stake)}[/]")
         if any(h.side_bets for p in self.players for h in p.hands):
-            self.ui.pause(self.deal_delay)
+            self.ui.pause(min(self.deal_delay / 2, SIDE_BET_BEAT_S), skippable=True)   # a beat to see the results
 
     def display_table(self) -> None:
         self.ui.set_active(None)

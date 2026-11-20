@@ -2,6 +2,10 @@
 
 One entry per release. The newest entry matches `PLUGIN_META["version"]` in `plugin.py` and the release's git tag (`v` + version, e.g. `v5.1.0`).
 
+- v5.3.1
+  - the deal is quicker with several hands out: the whole deal takes at most 1.2 s, plus 0.3 s to show the side bets (3 hands with side bets took 4.3 s), and any key deals the rest at once
+  - a lost side bet is marked under its hand (`PP -$5`, styled like the LOSE badge) instead of looking the same as before the deal
+  - the header fits at 80 columns: at least two spaces after the title, and when space runs out the deck count, then the shoe count, then your name are dropped, then the table name is shortened. The table's limits are always shown
 - v5.3
   - multi-hand: play up to 3 hands at once against one dealer, each with its own bet (`max_hands` setting / table rule, default 1). Hands sit side by side on the table, and each one doubles, splits and gets its own result; the split limit counts per hand
   - side bets, each switched on separately with its own per-hand min and max:

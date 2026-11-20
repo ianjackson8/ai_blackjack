@@ -13,7 +13,7 @@ PLUGIN_META = {
     "name": "Blackjack",
     "description": "Beat the dealer to 21. Blackjack pays 3:2.",
     "min_bet": 1.0,
-    "version": "5.3.0",
+    "version": "5.3.1",
     "author": "Ian Jackson",
     # Table rules the casino can set per table (GAME_SPEC §3.5). Defaults match game_settings.json.
     "rules": {
