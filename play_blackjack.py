@@ -3,7 +3,7 @@
 Play blackjack in terminal
 
 Author: Ian Jackson
-Version v5.4.0
+Version v5.4.1
 '''
 
 import math
@@ -227,7 +227,27 @@ class Hand:
         return f"[{cards_str}] | Value: {self.calculate_value()}"
 
 
+def cents(amount) -> float:
+    '''Money rounded to the cent. Float sums drift (96.49 - 80 == 16.489999999999995), so every
+    balance and every money comparison goes through this.'''
+    value = round(float(amount), 2)
+    return int(value) if value.is_integer() else value
+
+
+def amount_text(amount) -> str:
+    '''An amount as the player would type it: 25, 16.49, 12345.5 (never "1.23457e+04").'''
+    return f"{cents(amount):.2f}".rstrip("0").rstrip(".")
+
+
 class Player:
+    @property
+    def balance(self):
+        return self._balance
+
+    @balance.setter
+    def balance(self, value) -> None:
+        self._balance = cents(value)   # every +=, -= and sync lands on whole cents
+
     def __init__(self, name: str, balance: int):
         self.name = name
         self.balance = balance
@@ -263,7 +283,7 @@ class Player:
         '''One bet per spot (multi-hand plays several); each spot gets its own hand.'''
         if not amounts or any(a <= 0 for a in amounts):
             raise ValueError("Bet amount must be greater than zero.")
-        if sum(amounts) > self.balance:
+        if cents(sum(amounts)) > self.balance:
             raise ValueError("Bet amount exceeds available balance.")
         self.hands = [Hand(spot=i) for i in range(len(amounts))]
         self.hand_bets = list(amounts)
@@ -1008,7 +1028,7 @@ class BlackjackGame:
         bets: List[float] = []
         while len(bets) < self.max_hands:
             n = len(bets)
-            left = player.balance - sum(bets)
+            left = cents(player.balance - sum(bets))
             if n and (left <= 0 or (self.min_bet is not None and left < self.min_bet)):
                 break                                   # can't cover another hand
             if n == 0:
@@ -1051,10 +1071,10 @@ class BlackjackGame:
         n = len(player.hands)
         for key, (lo, hi) in self.side_bets.items():
             info = SIDE_BETS[key]
-            if player.balance < lo * n:
+            if player.balance < cents(lo * n):
                 continue
             last = player.last_side.get(key, 0)
-            suggested = last if last and lo <= last <= hi and last * n <= player.balance else 0
+            suggested = last if last and lo <= last <= hi and cents(last * n) <= player.balance else 0
             each = " per hand" if n > 1 else ""
             # kept short so the key hints fit at 80 columns; the paytable is in the ? rules
             prompt = (f"[bold]{esc(player.name)}[/] — [gold1]{info['label']}[/] {money(lo)}–{money(hi)}{each}, "
@@ -1063,7 +1083,7 @@ class BlackjackGame:
                 amount = self._ask_amount(prompt, suggested)
                 if amount and not lo <= amount <= hi:
                     self.ui.error(f"{info['label']} bets are {money(lo)}–{money(hi)}{each}.")
-                elif amount * n > player.balance:
+                elif cents(amount * n) > player.balance:
                     self.ui.error("Side bet exceeds available balance.")
                 else:
                     break
@@ -1080,10 +1100,10 @@ class BlackjackGame:
         '''A dollar amount (0 allowed) from the player, handling /commands (and Esc / ? at the casino).'''
         while True:
             if self.plugin_mode:
-                raw = self.ui.ask(f"{prompt}  [grey62]Esc leave table · ? help[/]", default=f"{suggested:g}",
+                raw = self.ui.ask(f"{prompt}  [grey62]Esc leave table · ? help[/]", default=amount_text(suggested),
                                   hotkeys={"esc": "/leave", "?": "/help"})
             else:
-                raw = self.ui.ask(prompt, default=f"{suggested:g}")
+                raw = self.ui.ask(prompt, default=amount_text(suggested))
             if raw.startswith('/'):
                 self.parse_command(raw[1:])
                 continue
@@ -1095,7 +1115,7 @@ class BlackjackGame:
             if not math.isfinite(amount) or amount < 0:
                 self.ui.error("Bet must be zero or more.")
                 continue
-            return int(amount) if amount.is_integer() else amount
+            return cents(amount)
 
     #== Remote players (Terminal Casino, GAME_SPEC §3.6) ==#
 
@@ -1220,8 +1240,7 @@ class BlackjackGame:
         if answer["action"] != "bet":
             self.ui.log(f"{self._styled(seat)} [grey62]sits out this round[/]")
             return
-        bet = float(answer["amount"])
-        bet = int(bet) if bet.is_integer() else round(bet, 2)
+        bet = cents(answer["amount"])
         seat.place_bets([bet])
         self.ui.log(f"{self._styled(seat)} bets {money(bet)}")
         for key, (s_lo, s_hi) in self.side_bets.items():
@@ -1235,8 +1254,7 @@ class BlackjackGame:
                  {"action": "no_side_bet", "label": f"No {info['label']}"}],
                 {"action": "no_side_bet"})
             if answer["action"] == "side_bet":
-                amount = float(answer["amount"])
-                amount = int(amount) if amount.is_integer() else round(amount, 2)
+                amount = cents(answer["amount"])
                 seat.hands[0].side_bets[key] = amount
                 seat.balance -= amount
                 self.ui.log(f"{self._styled(seat)} bets {money(amount)} on {info['label']}")
