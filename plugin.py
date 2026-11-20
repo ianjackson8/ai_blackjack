@@ -13,7 +13,7 @@ PLUGIN_META = {
     "name": "Blackjack",
     "description": "Beat the dealer to 21. Blackjack pays 3:2.",
     "min_bet": 1.0,
-    "version": "5.4.0",
+    "version": "5.4.1",
     "author": "Ian Jackson",
     # Remote players (GAME_SPEC §3.6): Claude Code sessions take seats through the casino's MCP server
     "multiplayer": {"mode": "seats", "max_remote": 3},

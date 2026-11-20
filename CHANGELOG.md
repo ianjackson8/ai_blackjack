@@ -2,6 +2,9 @@
 
 One entry per release. The newest entry matches `PLUGIN_META["version"]` in `plugin.py` and the release's git tag (`v` + version, e.g. `v5.1.0`).
 
+- v5.4.1
+  - fixed: betting your exact balance could be refused with "Bet amount exceeds available balance". Float math drifted (96.49 − 80 = 16.489999…), so after losing $80 from $96.49 an all-in bet of $16.49 was refused, as was $6.49 on a second hand at $10. Balances and every money check now work in whole cents
+  - the suggested bet keeps every cent (a big balance used to be suggested as 12345.7)
 - v5.4
   - remote players (Terminal Casino 1.2, GAME_SPEC §3.6): up to 3 Claude Code sessions can sit at your table through the casino's MCP server. `run()` takes `remote`, and `PLUGIN_META["multiplayer"]` declares `seats` with `max_remote` 3
     - they're seated between rounds and play by the same rules and limits: bet or sit out, Perfect Pairs and 21+3 when the table has them, insurance, then hit/stand/double/split. One hand each
