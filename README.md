@@ -25,6 +25,19 @@ The game runs as a full-screen terminal UI with card art, a pile of casino chips
 
 At the bet prompt, type an amount (`0` to sit out a round) or a `/command`.
 
+### Multi-hand and side bets
+Both are off by default; switch them on in the settings (or per table at the casino).
+
+- **Multi-hand** (`max_hands` 2–3): you're asked for a bet on each hand in turn; `0` on a later hand plays the ones you've bet so far, and `Enter` repeats last round's bet for that hand. All your hands are dealt and played against one dealer, left to right, and each can be doubled and split on its own (the split limit is per hand). Bots always play one hand.
+- **Side bets**, asked for after your main bets. The amount goes on each of your hands, and `Enter` repeats last round's. They're settled straight after the deal, before insurance and before anyone acts, so they pay even if the dealer has blackjack.
+
+  | Side bet | Wins when | Pays |
+  | --- | --- | --- |
+  | Perfect Pairs | your first two cards are a pair | mixed pair (different colours) 6:1 · colored pair (same colour) 12:1 · perfect pair (same suit) 25:1 |
+  | 21+3 | your first two cards plus the dealer's up card make a three-card poker hand | flush 5:1 · straight 10:1 · three of a kind 30:1 · straight flush 40:1 · suited trips 100:1 |
+
+  A 21+3 straight can run A-2-3 or Q-K-A but doesn't wrap (K-A-2 loses).
+
 ## Training Mode
 Train the AI bot without human player interaction
 ```
@@ -57,7 +70,7 @@ python3 trial.py --repeat 200     # plus 200 more trials to see who wins most of
 
 ## Terminal Casino
 This repo doubles as a [Terminal Casino](../terminal_casino) game: `plugin.py` is the adapter the casino loads.
-Add it to the casino as `plugins/ai_blackjack` (git submodule or a copy) and it appears in the lobby.
+The casino ships it at a release tag (`python scripts/games.py set ai_blackjack v5.3.0` from the casino root records the tag in its `games.lock`), and it appears in the lobby as `plugins/ai_blackjack`.
 
 At the casino the game runs in *plugin mode*:
 - one seat for the casino player, no bots
@@ -73,6 +86,13 @@ At the casino the game runs in *plugin mode*:
   | `allow_double_after_split` | true / false | true |
   | `split_limit` | `unlimited`, `1`, `2`, `3` | `unlimited` |
   | `allow_insurance` | true / false | true |
+  | `max_hands` | 1–3 | 1 |
+  | `perfect_pairs` | true / false | false |
+  | `perfect_pairs_min`, `perfect_pairs_max` | $1–$10,000 per hand | $1, $100 |
+  | `twenty_one_plus_three` | true / false | false |
+  | `twenty_one_plus_three_min`, `twenty_one_plus_three_max` | $1–$10,000 per hand | $1, $100 |
+
+  A side bet max set below its min is raised to the min. With the defaults a table plays exactly as before v5.3; a High Roller table might set `max_hands: 3` with both side bets on.
 
 Running `python3 play_blackjack.py` directly is unchanged.
 
@@ -91,6 +111,9 @@ They can also be edited directly in `game_settings.json`:
 - `allow_double_after_split`: \<bool\> allows the player to double on a split (true/false)
 - `split_limit`: \<int\> The amount of splits allowed for a player (set to -1 for no limit)
 - `allow_insurance`: \<bool\> offer insurance side-bet to human players when dealer shows Ace (true/false)
+- `max_hands` : \<int\> hands a human player can play at once, 1–3 (see [Multi-hand and side bets](#multi-hand-and-side-bets))
+- `perfect_pairs` / `twenty_one_plus_three` : \<bool\> offer the Perfect Pairs / 21+3 side bet
+- `perfect_pairs_min`, `perfect_pairs_max`, `twenty_one_plus_three_min`, `twenty_one_plus_three_max` : \<int\> side bet limits, per hand
 - `train_param.rounds` : \<int\> rounds played by `--train`
 - `counter.max_spread` : \<int\> most a counter bot will bet, in units of `default_bet`
 - `bots` : \<List[dict]> information of bots to play alongside player

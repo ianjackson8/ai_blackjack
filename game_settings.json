@@ -10,6 +10,13 @@
     "allow_double_after_split": true,
     "split_limit": -1,
     "allow_insurance": true,
+    "max_hands": 1,
+    "perfect_pairs": false,
+    "perfect_pairs_min": 1,
+    "perfect_pairs_max": 100,
+    "twenty_one_plus_three": false,
+    "twenty_one_plus_three_min": 1,
+    "twenty_one_plus_three_max": 100,
     "bots": [
         {
             "name": "NN Bot",

@@ -3,9 +3,10 @@
 Play blackjack in terminal
 
 Author: Ian Jackson
-Version v5.1
+Version v5.3
 '''
 
+import math
 import random
 import os
 import sys
@@ -23,6 +24,7 @@ from typing import List, Optional, Union
 from datetime import datetime
 from pathlib import Path
 
+from bj_sidebets import SIDE_BETS, paytable, side_bet_limits
 from bj_counter import BASE_EDGE, bet_units, load_counter, make_tracker, save_counter, train_counter, evaluate_counter
 from bj_strategy import basic_strategy
 from bj_tui import (HeadlessUI, RichUI, card_markup, edit_settings, esc, hand_label, hand_total, key_value_table, money,
@@ -48,6 +50,7 @@ SETTINGS_FILE = str(HERE / 'game_settings.json')
 MODELS_DIR = HERE / "models"
 SAVES_DIR = HERE / "saves"
 LOGS_DIR = HERE / "logs"
+MAX_HANDS = 3          # most hands (spots) one player can play at once
 BOT_STRATEGIES = ["by the books", "default", "ai-nn", "counter", "counter-hilo"]
 
 # Fields shown in the in-game settings editor (bots are edited separately)
@@ -60,6 +63,20 @@ SETTINGS_FIELDS = [
     {"key": "allow_insurance", "label": "Insurance", "kind": "bool", "desc": "Offer insurance when the dealer shows an Ace"},
     {"key": "allow_double_after_split", "label": "Double after split", "kind": "bool", "desc": "Allow doubling down on split hands"},
     {"key": "split_limit", "label": "Split limit", "kind": "split_limit", "min": -1, "desc": "Max splits per hand (-1 = unlimited)"},
+    {"key": "max_hands", "label": "Hands per player", "kind": "int", "min": 1, "max": MAX_HANDS, "default": 1,
+     "desc": f"Play up to this many hands at once (1-{MAX_HANDS})"},
+    {"key": "perfect_pairs", "label": "Perfect Pairs", "kind": "bool", "default": False,
+     "desc": "Side bet: first two cards a pair, pays 6:1 to 25:1"},
+    {"key": "perfect_pairs_min", "label": "Perfect Pairs min", "kind": "money", "min": 1, "default": 1,
+     "desc": "Smallest Perfect Pairs bet per hand"},
+    {"key": "perfect_pairs_max", "label": "Perfect Pairs max", "kind": "money", "min": 1, "default": 100,
+     "desc": "Largest Perfect Pairs bet per hand"},
+    {"key": "twenty_one_plus_three", "label": "21+3", "kind": "bool", "default": False,
+     "desc": "Side bet: your two cards + dealer up card as a poker hand, 5:1 to 100:1"},
+    {"key": "twenty_one_plus_three_min", "label": "21+3 min", "kind": "money", "min": 1, "default": 1,
+     "desc": "Smallest 21+3 bet per hand"},
+    {"key": "twenty_one_plus_three_max", "label": "21+3 max", "kind": "money", "min": 1, "default": 100,
+     "desc": "Largest 21+3 bet per hand"},
     {"key": "log_game", "label": "Log games", "kind": "bool", "desc": "Write every hand to logs/"},
     {"key": "show_graph", "label": "Balance graph", "kind": "bool", "desc": "Plot balances on exit (needs Log games)"},
     {"key": "show_output", "label": "Show table in --train", "kind": "bool", "desc": "Off = fast one-line progress"},
@@ -168,8 +185,13 @@ class Shoe:
 
 
 class Hand:
-    def __init__(self, hand: list[Card] = None):
+    def __init__(self, hand: list[Card] = None, spot: int = 0, split: bool = False):
         self.cards = [] if hand is None else hand
+        self.spot = spot            # which betting spot (multi-hand) this hand was dealt to
+        self.split = split          # came from a split: 21 isn't a natural, DAS rules apply
+        self.doubled = False
+        self.side_bets: dict = {}   # side bet key -> stake (see bj_sidebets.SIDE_BETS)
+        self.side_results: dict = {}  # side bet key -> (outcome name, pays N:1, amount won) or None
 
     def add_card(self, card: Card):
         self.cards.append(card)
@@ -187,6 +209,10 @@ class Hand:
 
     def is_blackjack(self) -> bool:
         return len(self.cards) == 2 and self.calculate_value() == 21
+
+    def is_natural(self) -> bool:
+        '''A blackjack that pays 3:2: two-card 21 on a hand that wasn't split.'''
+        return self.is_blackjack() and not self.split
 
     def is_busted(self) -> bool:
         return self.calculate_value() > 21
@@ -210,27 +236,49 @@ class Player:
         self.results = []
         self.insurance_bet = 0
         self.last_bet = 0
+        self.last_bets: List[float] = []   # last round's bet on each hand (multi-hand)
+        self.last_side: dict = {}          # last side bet amounts, offered again as the default
         self.round_start_balance = balance
         self.stats = {"win": 0, "lose": 0, "push": 0, "bust": 0, "blackjack": 0}
+        self.side_stats = {"bets": 0, "wins": 0, "net": 0.0}   # Perfect Pairs / 21+3, all hands
         # what a bot was thinking this round, for the UI's "Bot Brains" panel
         self.brain = {"bet": None, "plays": []}
 
-    def log_action(self, action: str, dealer_visible_card: str):
+    def log_action(self, action: str, dealer_visible_card: str, hand: Hand = None):
+        hand = hand if hand is not None else self.hands[-1]
         self.actions.append({
             "action": action,
-            "player_hand": [str(card) for card in self.hands[-1].cards],
-            "hand_value": self.hands[-1].calculate_value(),
+            "hand": self.hands.index(hand) if hand in self.hands else len(self.hands) - 1,
+            "player_hand": [str(card) for card in hand.cards],
+            "hand_value": hand.calculate_value(),
             "dealer_visible_card": dealer_visible_card
         })
 
     def place_bet(self, amount: int) -> None:
-        if amount <= 0:
+        self.place_bets([amount])
+
+    def place_bets(self, amounts: List[float]) -> None:
+        '''One bet per spot (multi-hand plays several); each spot gets its own hand.'''
+        if not amounts or any(a <= 0 for a in amounts):
             raise ValueError("Bet amount must be greater than zero.")
-        if amount > self.balance:
+        if sum(amounts) > self.balance:
             raise ValueError("Bet amount exceeds available balance.")
-        self.current_bet = amount
-        self.hand_bets = [amount]
-        self.balance -= amount
+        self.hands = [Hand(spot=i) for i in range(len(amounts))]
+        self.hand_bets = list(amounts)
+        self.current_bet = sum(amounts)
+        self.balance -= sum(amounts)
+
+    def hand_stake(self, hand_index: int):
+        '''The bet riding on one hand (doubling included).'''
+        return self.hand_bets[hand_index] if hand_index < len(self.hand_bets) else self.current_bet
+
+    def splits_on(self, spot: int) -> int:
+        '''How many times the hand on this spot has been split.'''
+        return sum(1 for h in self.hands if h.spot == spot) - 1
+
+    def side_bets_staked(self) -> float:
+        '''Side bets placed this round that haven't been settled yet.'''
+        return sum(amount for h in self.hands for key, amount in h.side_bets.items() if key not in h.side_results)
 
     def hit(self, card: Card) -> None:
         self.hands[-1].add_card(card)
@@ -242,16 +290,17 @@ class Player:
         current_hand = self.hands[hand_index]
         if len(current_hand.cards) != 2 or current_hand.cards[0].rank != current_hand.cards[1].rank:
             raise ValueError("Cannot split: hand must have exactly two cards of the same rank.")
-        if self.current_bet > self.balance:
-            raise ValueError(f"Insufficient balance to split (need ${self.current_bet} for second hand).")
-        self.balance -= self.current_bet
+        stake = self.hand_stake(hand_index)
+        if stake > self.balance:
+            raise ValueError(f"Insufficient balance to split (need ${stake} for second hand).")
+        self.balance -= stake
         card1, card2 = current_hand.cards
-        self.hands[hand_index] = Hand()
-        self.hands[hand_index].add_card(card1)
-        new_hand = Hand()
-        new_hand.add_card(card2)
+        # the first hand keeps its (already settled) side bets so they stay on show
+        current_hand.cards = [card1]
+        current_hand.split = True
+        new_hand = Hand([card2], spot=current_hand.spot, split=True)
         self.hands.insert(hand_index + 1, new_hand)
-        self.hand_bets.insert(hand_index + 1, self.current_bet)
+        self.hand_bets.insert(hand_index + 1, stake)
 
     def double_down(self, card: Card, hand: Hand = None, hand_index: int = None):
         if hand is None:
@@ -265,6 +314,7 @@ class Player:
             raise ValueError("Insufficient balance to double down.")
         self.balance -= bet
         self.hand_bets[hand_index] = bet * 2
+        hand.doubled = True
         hand.add_card(card)
 
     def reset_for_new_round(self):
@@ -313,6 +363,7 @@ class Bot(Player):
                         bet = self.hand_bets[0] if self.hand_bets else self.current_bet
                         self.balance -= bet
                         self.hand_bets[0] = bet * 2
+                        hand.doubled = True
                         card = shoe.draw_card()
                         hand.add_card(card)
                         ui.log(f"{name} [gold1]doubles[/] → {card_markup(card)}  ({hand_label(hand)})")
@@ -522,8 +573,13 @@ class CounterBot(Bot):
 class BlackjackGame:
     def __init__(self, num_decks: int, player_names: List[str], bot_info: List[dict], starting_balance: int, log_file: str,
                  deal_delay: int, allow_double_after_split: bool = True, split_limit: int = 1,
-                 allow_insurance: bool = True, save_data: dict = None, ui=None, counter_max_spread: int = 8):
+                 allow_insurance: bool = True, save_data: dict = None, ui=None, counter_max_spread: int = 8,
+                 max_hands: int = 1, side_bets: Optional[dict] = None):
         self.ui = ui or NULL_UI
+        # humans may play up to max_hands spots at once; bots always play one
+        self.max_hands = max(1, min(MAX_HANDS, int(max_hands)))
+        # side bets on offer: key (see bj_sidebets.SIDE_BETS) -> (min, max) stake per hand
+        self.side_bets = {k: v for k, v in (side_bets or {}).items() if k in SIDE_BETS}
         self.num_decks = num_decks
         self.shoe = Shoe(num_decks)
         self.shoe.shuffle()
@@ -621,30 +677,63 @@ class BlackjackGame:
         delay = min(self.deal_delay, 0.25)
         for player in in_play:
             if GOD_MODE and not isinstance(player, (Bot, TrainableBot)):
-                player.hands = [Hand([Card("Ace", "Hearts"), Card("King", "Hearts")])]
-        # deal like a real table: one card each, round twice, dealer last
+                for hand in player.hands:
+                    hand.cards = [Card("Ace", "Hearts"), Card("King", "Hearts")]
+        # deal like a real table: one card to each hand, round twice, dealer last
         for _ in range(2):
             for player in in_play:
                 if GOD_MODE and not isinstance(player, (Bot, TrainableBot)):
                     continue
-                player.hit(self.shoe.draw_card())
-                self.ui.pause(delay)
+                for hand in player.hands:
+                    hand.add_card(self.shoe.draw_card())
+                    self.ui.pause(delay)
             self.dealer.hit(self.shoe.draw_card())
             self.ui.pause(delay)
+
+    def settle_side_bets(self) -> None:
+        '''Side bets are decided by the deal alone, so they're paid (or taken) before anyone acts.'''
+        up = self.dealer.hands[0].cards[1]
+        for player in self.players:
+            for i, hand in enumerate(player.hands):
+                for key, stake in hand.side_bets.items():
+                    info = SIDE_BETS[key]
+                    outcome = info["settle"](hand, up)
+                    where = f" hand {i + 1}" if len(player.hands) > 1 else ""
+                    who = f"[green3]{esc(player.name)}[/]{where}"
+                    player.side_stats["bets"] += 1
+                    if outcome:
+                        name, pays = outcome
+                        won = stake * pays
+                        player.balance += stake + won
+                        player.side_stats["wins"] += 1
+                        player.side_stats["net"] += won
+                        hand.side_results[key] = (name, pays, won)
+                        self.ui.log(f"{who} {info['label']}: [bold gold1]{name}[/] pays {pays}:1 "
+                                    f"[green]+{money(won)}[/]")
+                    else:
+                        player.side_stats["net"] -= stake
+                        hand.side_results[key] = None
+                        self.ui.log(f"{who} {info['label']} loses [red]-{money(stake)}[/]")
+        if any(h.side_bets for p in self.players for h in p.hands):
+            self.ui.pause(self.deal_delay)
 
     def display_table(self) -> None:
         self.ui.set_active(None)
 
     def _action_options(self, player: Player, hand: Hand, hand_index: int) -> list:
         options = [("h1", "hit", "Hit"), ("s2", "stand", "Stand")]
-        bet = player.hand_bets[hand_index] if hand_index < len(player.hand_bets) else player.current_bet
+        bet = player.hand_stake(hand_index)
         two_cards = hand.num_cards() == 2
-        if two_cards and bet <= player.balance and (len(player.hands) == 1 or self.allow_double_after_split):
+        if two_cards and bet <= player.balance and (not hand.split or self.allow_double_after_split):
             options.append(("d3", "double", "Double"))
-        can_split = (self.split_limit == -1) or (len(player.hands) <= self.split_limit)
-        if two_cards and hand.cards[0].rank == hand.cards[1].rank and player.current_bet <= player.balance and can_split:
+        if two_cards and hand.cards[0].rank == hand.cards[1].rank and bet <= player.balance \
+                and self._can_split(player, hand):
             options.append(("p4", "split", "Split"))
         return options
+
+    def _can_split(self, player: Player, hand: Hand) -> bool:
+        '''Split limit, counted per spot (each multi-hand spot has its own allowance).'''
+        return self.split_limit == -1 or player.splits_on(hand.spot) < self.split_limit
 
     def player_turn(self, player: Player) -> None:
         dealer_visible_card = str(self.dealer.hands[0].cards[1])
@@ -656,7 +745,7 @@ class BlackjackGame:
 
             while True:
                 self.ui.set_active(player, hand_index)
-                if hand.is_blackjack() and len(player.hands) == 1:
+                if hand.is_natural():
                     self.ui.log(f"{name} has [bold gold1]Blackjack![/]")
                     self.ui.pause(self.deal_delay / 2)
                     break
@@ -666,7 +755,7 @@ class BlackjackGame:
                     break
                 elif hand.calculate_value() == 21:
                     self.ui.log(f"{name} stands on 21")
-                    player.log_action("stand", dealer_visible_card)
+                    player.log_action("stand", dealer_visible_card, hand)
                     break
 
                 where = f" · hand {hand_index + 1}/{len(player.hands)}" if len(player.hands) > 1 else ""
@@ -678,18 +767,23 @@ class BlackjackGame:
                     hand.add_card(card)
                     self.ui.log(f"{name} hits → {card_markup(card)}  ({hand_label(hand)})")
                     self.ui.pause(self.deal_delay)
-                    player.log_action("hit", dealer_visible_card)
+                    player.log_action("hit", dealer_visible_card, hand)
                 elif action == "stand":
                     self.ui.log(f"{name} stands on {hand_label(hand)}")
-                    player.log_action("stand", dealer_visible_card)
+                    player.log_action("stand", dealer_visible_card, hand)
                     break
                 elif action == "double":
-                    if len(player.hands) > 1 and not self.allow_double_after_split:
+                    if hand.split and not self.allow_double_after_split:
                         self.ui.error("Cannot double down after splitting (disabled in settings).")
                     else:
                         try:
+                            # check before drawing, or a refused double throws a card away (#34)
+                            if hand.num_cards() != 2:
+                                raise ValueError("Cannot double down after a hit.")
+                            if player.hand_stake(hand_index) > player.balance:
+                                raise ValueError("Insufficient balance to double down.")
                             player.double_down(self.shoe.draw_card(), hand, hand_index)
-                            player.log_action("double", dealer_visible_card)
+                            player.log_action("double", dealer_visible_card, hand)
                         except ValueError as e:
                             self.ui.error(str(e))
                             continue
@@ -699,11 +793,10 @@ class BlackjackGame:
                             self.ui.log(f"{name} [red]busts[/] with {hand.calculate_value()}")
                         break
                 elif action == "split":
-                    can_split = (self.split_limit == -1) or (len(player.hands) <= self.split_limit)
-                    if can_split:
+                    if self._can_split(player, hand):
                         try:
                             player.split(hand_index)
-                            player.log_action("split", dealer_visible_card)
+                            player.log_action("split", dealer_visible_card, hand)
                         except ValueError as e:
                             self.ui.error(str(e))
                             continue
@@ -741,7 +834,7 @@ class BlackjackGame:
         for player in self.players:
             if player.current_bet == 0:
                 continue
-            max_insurance = player.current_bet / 2
+            max_insurance = sum(player.hand_bets) / 2
             self.ui.set_active(player)
             while True:
                 raw = self.ui.ask(
@@ -776,21 +869,22 @@ class BlackjackGame:
 
         dealer_value = self.dealer.hands[0].calculate_value()
         dealer_blackjack = self.dealer.hands[0].is_blackjack()
-        split = len(player.hands) > 1
+        multi = len(player.hands) > 1
 
         for i, hand in enumerate(player.hands):
-            bet = player.hand_bets[i] if player.hand_bets and i < len(player.hand_bets) else player.current_bet
+            name = f"[bold]{esc(player.name)}[/]" + (f" H{i + 1}" if multi else "")
+            bet = player.hand_stake(i)
             player_value = hand.calculate_value()
             if hand.is_busted():
                 self.ui.log(f"{name} {player_value} · [red]bust -{money(bet)}[/]")
                 player.results.append("busted")
                 player.stats["bust"] += 1
-            elif hand.is_blackjack() and not split and dealer_blackjack:
+            elif hand.is_natural() and dealer_blackjack:
                 player.balance += bet
                 self.ui.log(f"{name} blackjack vs dealer blackjack · [grey70]push[/]")
                 player.results.append("push")
                 player.stats["push"] += 1
-            elif hand.is_blackjack() and not split:   # a natural; 21 after a split is just 21
+            elif hand.is_natural():   # 21 after a split is just 21
                 winnings = bet * 2.5
                 player.balance += winnings
                 self.ui.log(f"{name} {player_value} · [bold gold1]blackjack +{money(bet * 1.5)}[/]")
@@ -840,45 +934,98 @@ class BlackjackGame:
             return
 
         self.ui.set_active(player)
-        while True:
-            suggested = player.last_bet if 0 < player.last_bet <= player.balance else min(DEFAULT_BET, player.balance)
-            suggested = self._within_limits(suggested, player.balance)
-            if self.plugin_mode:
-                raw = self.ui.ask(
-                    f"[bold]{esc(player.name)}[/] ([green]{money(player.balance)}[/]) — place your bet, 0 to sit out  "
-                    f"[grey62]Esc leave table · ? help[/]",
-                    default=f"{suggested:g}", hotkeys={"esc": "/leave", "?": "/help"})
+        who = f"[bold]{esc(player.name)}[/]"
+        bets: List[float] = []
+        while len(bets) < self.max_hands:
+            n = len(bets)
+            left = player.balance - sum(bets)
+            if n and (left <= 0 or (self.min_bet is not None and left < self.min_bet)):
+                break                                   # can't cover another hand
+            if n == 0:
+                suggested = player.last_bet if 0 < player.last_bet <= left else min(DEFAULT_BET, left)
+                suggested = self._within_limits(suggested, left)
+                if self.max_hands > 1:
+                    prompt = f"{who} ([green]{money(left)}[/]) — bet on hand 1 of {self.max_hands}, 0 to sit out"
+                elif self.plugin_mode:
+                    prompt = f"{who} ([green]{money(player.balance)}[/]) — place your bet, 0 to sit out"
+                else:
+                    prompt = f"{who} ([green]{money(player.balance)}[/]) — bet amount, 0 to sit out, /help for commands"
             else:
-                raw = self.ui.ask(
-                    f"[bold]{esc(player.name)}[/] ([green]{money(player.balance)}[/]) — bet amount, 0 to sit out, /help for commands",
-                    default=f"{suggested:g}")
-            if raw.startswith('/'):
-                self.parse_command(raw[1:])
-                continue
-            try:
-                bet = float(raw)
-                if bet.is_integer():
-                    bet = int(bet)
-            except ValueError:
-                self.ui.error("Bet must be a number.")
-                continue
+                prev = player.last_bets[n] if n < len(player.last_bets) else 0
+                suggested = self._within_limits(prev, left) if prev else 0
+                prompt = f"{who} ([green]{money(left)}[/]) — bet on hand {n + 1}, 0 to stop at {n}"
+            bet = self._ask_amount(prompt, suggested)
             if bet == 0:
-                self.ui.log(f"[grey62]{esc(player.name)} sits out this round[/]")
-                return
+                if n == 0:
+                    self.ui.log(f"[grey62]{esc(player.name)} sits out this round[/]")
+                    return
+                break
             if self.min_bet is not None and bet < self.min_bet:
                 self.ui.error(f"Table minimum is {money(self.min_bet)}.")
                 continue
             if self.max_bet is not None and bet > self.max_bet:
                 self.ui.error(f"Table maximum is {money(self.max_bet)}.")
                 continue
-            try:
-                player.place_bet(bet)
-            except ValueError as e:
-                self.ui.error(str(e))
+            if bet > left:
+                self.ui.error("Bet amount exceeds available balance.")
                 continue
-            player.last_bet = bet
-            self.ui.log(f"[green3]{esc(player.name)}[/] bets {money(bet)}")
-            return
+            bets.append(bet)
+        player.place_bets(bets)
+        player.last_bet, player.last_bets = bets[0], list(bets)
+        each = " + ".join(money(b) for b in bets)
+        self.ui.log(f"[green3]{esc(player.name)}[/] bets {each}" + (f" on {len(bets)} hands" if len(bets) > 1 else ""))
+        self.collect_side_bets(player)
+
+    def collect_side_bets(self, player: Player) -> None:
+        '''Ask for each side bet on offer; the amount goes on every hand the player is playing.'''
+        n = len(player.hands)
+        for key, (lo, hi) in self.side_bets.items():
+            info = SIDE_BETS[key]
+            if player.balance < lo * n:
+                continue
+            last = player.last_side.get(key, 0)
+            suggested = last if last and lo <= last <= hi and last * n <= player.balance else 0
+            each = " per hand" if n > 1 else ""
+            # kept short so the key hints fit at 80 columns; the paytable is in the ? rules
+            prompt = (f"[bold]{esc(player.name)}[/] — [gold1]{info['label']}[/] {money(lo)}–{money(hi)}{each}, "
+                      f"0 for none")
+            while True:
+                amount = self._ask_amount(prompt, suggested)
+                if amount and not lo <= amount <= hi:
+                    self.ui.error(f"{info['label']} bets are {money(lo)}–{money(hi)}{each}.")
+                elif amount * n > player.balance:
+                    self.ui.error("Side bet exceeds available balance.")
+                else:
+                    break
+            player.last_side[key] = amount
+            if not amount:
+                continue
+            for hand in player.hands:
+                hand.side_bets[key] = amount
+            player.balance -= amount * n
+            self.ui.log(f"[green3]{esc(player.name)}[/] bets {money(amount)}{' on each hand' if n > 1 else ''} "
+                        f"on {info['label']}")
+
+    def _ask_amount(self, prompt: str, suggested) -> float:
+        '''A dollar amount (0 allowed) from the player, handling /commands (and Esc / ? at the casino).'''
+        while True:
+            if self.plugin_mode:
+                raw = self.ui.ask(f"{prompt}  [grey62]Esc leave table · ? help[/]", default=f"{suggested:g}",
+                                  hotkeys={"esc": "/leave", "?": "/help"})
+            else:
+                raw = self.ui.ask(prompt, default=f"{suggested:g}")
+            if raw.startswith('/'):
+                self.parse_command(raw[1:])
+                continue
+            try:
+                amount = float(raw)
+            except ValueError:
+                self.ui.error("Bet must be a number.")
+                continue
+            if not math.isfinite(amount) or amount < 0:
+                self.ui.error("Bet must be zero or more.")
+                continue
+            return int(amount) if amount.is_integer() else amount
 
     def _within_limits(self, amount, balance):
         '''Clamp a suggested bet to the table limits (plugin mode) and the balance.'''
@@ -904,6 +1051,7 @@ class BlackjackGame:
 
         self.deal_cards()
         self.display_table()
+        self.settle_side_bets()
 
         if self.allow_insurance and self.dealer.hands[0].cards[1].rank == "Ace":
             self.offer_insurance()
@@ -1023,8 +1171,12 @@ class BlackjackGame:
                     {
                         "final_hand": [str(card) for card in hand.cards],
                         "final_value": hand.calculate_value(),
+                        "bet": player.hand_stake(i),
+                        **({"side_bets": {k: {"bet": amt, "result": (hand.side_results.get(k) or (None,))[0],
+                                              "won": (hand.side_results.get(k) or (0, 0, 0))[2]}
+                                          for k, amt in hand.side_bets.items()}} if hand.side_bets else {}),
                     }
-                    for hand in player.hands
+                    for i, hand in enumerate(player.hands)
                 ],
                 "results": player.results,
                 "balance": player.balance
@@ -1043,7 +1195,8 @@ class BlackjackGame:
             json.dump(self.log_entries, file, indent=4)
 
     def check_shoe(self, force: bool = False):
-        if (len(self.shoe) < (len(self.players) + len(self.bots) + 1) * 3) or force:
+        hands = len(self.players) * self.max_hands + len(self.bots) + 1
+        if len(self.shoe) < hands * 3 or force:
             self.ui.log("[magenta]Shuffling a fresh shoe…[/]")
             self.shoe = Shoe(self.num_decks)
             self.shoe.shuffle()
@@ -1099,7 +1252,9 @@ class BlackjackGame:
 
     def _settled_balance(self, player: Player):
         '''Balance with any bet placed this round still counted — while betting, the round hasn't been played.'''
-        return player.balance + (sum(player.hand_bets) if self.phase == "betting" else 0)
+        if self.phase != "betting":
+            return player.balance
+        return player.balance + sum(player.hand_bets) + player.side_bets_staked()
 
     def _rounds_completed(self) -> int:
         return self.game_num - 1 if self.phase == "betting" else self.game_num
@@ -1118,8 +1273,13 @@ class BlackjackGame:
             ("Double", "On any first two cards" + ("; also after splitting" if self.allow_double_after_split
                                                      else "; not after splitting")),
             ("Split", f"Two cards of the same rank, {splits}. 21 after a split pays 1:1"),
-            ("Insurance", "Up to half your bet when the dealer shows an Ace; pays 2:1" if self.allow_insurance
+            ("Insurance", "Up to half your total bet when the dealer shows an Ace; pays 2:1" if self.allow_insurance
              else "Not offered"),
+        ] + ([("Hands", f"Play up to {self.max_hands} hands at once, each with its own bet")]
+             if self.max_hands > 1 else []) + [
+            (SIDE_BETS[key]["label"], f"{money(lo)}–{money(hi)} per hand; {SIDE_BETS[key]['about']}. "
+                                      f"{paytable(key)}. Settled on the deal")
+            for key, (lo, hi) in self.side_bets.items()
         ]
 
     def cash_out_balance(self, player: Player) -> float:
@@ -1135,7 +1295,7 @@ class BlackjackGame:
             return
         for player in self.seats:
             player.balance = self._settled_balance(player)
-            player.current_bet, player.hand_bets = 0, []
+            player.current_bet, player.hand_bets, player.hands = 0, [], [Hand()]
         self.game_num = self._rounds_completed()
 
     def save_game(self, save_name: str) -> str:
@@ -1399,7 +1559,7 @@ class TrainableBot(Player):
             else:  # double
                 self.balance -= stake
                 self.hand_bets[0] = stake * 2
-                self.doubled = True
+                self.doubled = hand.doubled = True
                 card = shoe.draw_card()
                 hand.add_card(card)
                 ui.log(f"{name} [gold1]doubles[/] → {card_markup(card)}  ({hand_label(hand)}){tag}")
@@ -1682,7 +1842,23 @@ def apply_table_rules(settings: dict, rules: dict) -> dict:
         merged["allow_insurance"] = bool(rules["allow_insurance"])
     if "split_limit" in rules:
         merged["split_limit"] = -1 if rules["split_limit"] == "unlimited" else int(rules["split_limit"])
+    if "max_hands" in rules:
+        merged["max_hands"] = int(rules["max_hands"])
+    for key in SIDE_BETS:
+        if key in rules:
+            merged[key] = bool(rules[key])
+        for bound in ("min", "max"):
+            if f"{key}_{bound}" in rules:
+                merged[f"{key}_{bound}"] = int(rules[f"{key}_{bound}"])
     return merged
+
+
+def table_options(settings: dict) -> dict:
+    '''BlackjackGame keyword arguments for multi-hand and the side bets switched on in `settings`.'''
+    return {
+        "max_hands": int(settings.get("max_hands", 1)),
+        "side_bets": {key: side_bet_limits(settings, key) for key in SIDE_BETS if settings.get(key, False)},
+    }
 
 
 def play_as_plugin(player_name: str, balance: float, table: Optional[dict] = None) -> float:
@@ -1715,6 +1891,7 @@ def play_as_plugin(player_name: str, balance: float, table: Optional[dict] = Non
             split_limit=settings.get('split_limit', 1),
             allow_insurance=settings.get('allow_insurance', True),
             ui=ui,
+            **table_options(settings),
         )
         if table is not None:
             game.table_name = table.get("name") or "Blackjack"
@@ -1818,6 +1995,7 @@ def main() -> int:
             save_data=save_data,
             ui=ui,
             counter_max_spread=int(settings.get("counter", {}).get("max_spread", 8)),
+            **table_options(settings),
         )
 
         if TRAIN_MODE:

@@ -69,6 +69,11 @@ RESULT_BADGES = {
 Option = Tuple[str, str, str]
 
 
+from bj_sidebets import SIDE_BETS
+
+HAND_MIN_W = 22        # narrowest column a hand gets when a seat's hands sit side by side
+
+
 def _key_matches(key: str, keys) -> bool:
     '''Option keys are either a string of single characters or a tuple of key names like ("up", "k").'''
     if isinstance(keys, str):
@@ -299,6 +304,35 @@ def chip_line(bet, result: Optional[str], width: int) -> Text:
     return line
 
 
+def side_bet_line(hand, revealed: bool = True, width: int = 0) -> Optional[Text]:
+    '''
+    One hand's side bets: "PP $5  21+3 $5" before the deal, then what each one did. Each bet gets
+    its own line when they don't fit side by side in `width`.
+    '''
+    bets = getattr(hand, "side_bets", None)
+    if not bets:
+        return None
+    items = []
+    for key, stake in bets.items():
+        short = SIDE_BETS[key]["short"] if key in SIDE_BETS else key
+        item = Text(no_wrap=True, overflow="ellipsis")
+        if not revealed or key not in hand.side_results:
+            item.append(f"{short} ", "gold1").append(money(stake), "bold")
+        elif hand.side_results[key] is None:
+            item.append(f"{short} ", "grey50").append(money(stake), "strike grey50")
+        else:
+            name, pays, won = hand.side_results[key]
+            # the money first, so a narrow column cuts the outcome's name, not the amount
+            item.append(f"{short} ", "gold1").append(f"+{money(won)}", "bold green").append(f" {name}", "green")
+        items.append(item)
+    joined = Text("  ", no_wrap=True, overflow="ellipsis").join(items)
+    if not width or joined.cell_len <= width:
+        return joined
+    lines = Text("\n").join(items)
+    lines.no_wrap, lines.overflow = True, "ellipsis"
+    return lines
+
+
 # Chip piles: the pile's height shows roughly how big a bet is and its colours hint at the
 # size (red for small bets ... orange for huge ones). It is a visual cue, not exact change.
 
@@ -492,6 +526,9 @@ def _stats_table(game, wide: bool = True) -> Table:
     any_rebuys = any(getattr(p, "rebuys", 0) for p in game.players + game.bots)
     if any_rebuys:
         table.add_column("Rebuys", justify="right", style="magenta")
+    any_side = any(getattr(p, "side_stats", {}).get("bets") for p in game.players + game.bots)
+    if any_side:
+        table.add_column("Side bets", justify="right", no_wrap=True)
     if wide:
         table.add_column("Best", justify="right", style="green", no_wrap=True)
         table.add_column("Worst", justify="right", style="red", no_wrap=True)
@@ -516,6 +553,10 @@ def _stats_table(game, wide: bool = True) -> Table:
         ]
         if any_rebuys:
             row.append(str(rebuys) if rebuys else "")
+        if any_side:
+            side = getattr(player, "side_stats", {})
+            row.append(Text(f"{side['wins']}/{side['bets']} {signed_money(side['net'])}",
+                            "green" if side["net"] >= 0 else "red") if side.get("bets") else "")
         if wide:
             row += [best, worst]
         table.add_row(*row)
@@ -1308,13 +1349,15 @@ class RichUI(BaseUI):
         seats = game.players + game.bots
         cols = max(1, min(len(seats), (width - 4) // 24)) if seats else 1
         rows = -(-len(seats) // cols) if seats else 0
-        max_hands = max((len(p.hands) for p in seats), default=1)
-        need = 9 + rows * (4 + 7 * max_hands)
-        compact = height < need
-        # chip piles need up to PILE_ROWS rows per hand instead of one
-        stacks = height >= 9 + rows * (4 + (6 + PILE_ROWS) * max_hands)
         col_w = (width - 4) // cols
         inner_w = col_w - 4
+        # rows of hands in the tallest seat (a seat's hands sit side by side when there's room)
+        hand_rows = max((-(-len(p.hands) // self._hand_cols(p, inner_w)) for p in seats), default=1)
+        side = max((len(getattr(h, "side_bets", None) or ()) for p in seats for h in p.hands), default=0)
+        need = 9 + rows * (4 + (7 + side) * hand_rows)
+        compact = height < need
+        # chip piles need up to PILE_ROWS rows per hand instead of one
+        stacks = height >= 9 + rows * (4 + (6 + side + PILE_ROWS) * hand_rows)
 
         dealer = self._dealer_panel(width - 6, reveal, compact)
 
@@ -1385,6 +1428,73 @@ class RichUI(BaseUI):
                 result_age if result_age is not None and result_age < max(CHIP_WIN_S, CHIP_LOSE_S) else None,
                 st["from"])
 
+    def _hand_cols(self, player, inner_w: int) -> int:
+        return max(1, min(len(player.hands), inner_w // HAND_MIN_W))
+
+    def _hand_grid(self, player, inner_w: int, build):
+        '''A seat's hands, side by side when there's room (multi-hand, splits), wrapping onto new rows.'''
+        n = max(1, len(player.hands))
+        cols = self._hand_cols(player, inner_w)
+        if n == 1 or cols == 1:
+            return Group(*[build(i, inner_w) for i in range(n)])
+        hand_w = inner_w // cols - 1
+        grid = Table.grid(padding=(0, 1, 0, 0))
+        for _ in range(cols):
+            grid.add_column(width=hand_w)
+        blocks = [build(i, hand_w) for i in range(n)]
+        for r in range(0, n, cols):
+            row = blocks[r:r + cols]
+            grid.add_row(*(row + [""] * (cols - len(row))))
+        return grid
+
+    def _bet_block(self, player, i: int, width: int, stacks: bool):
+        '''Before the deal: the chips on one spot, and its side bets.'''
+        bet = player.hand_bets[i] if i < len(player.hand_bets) else player.current_bet
+        parts = []
+        if len(player.hand_bets) > 1:
+            parts.append(Text(f"  H{i + 1}", "grey62"))
+        parts.append(self._chips(player, i, bet, None, width, stacks))
+        side = side_bet_line(player.hands[i], width=width) if i < len(player.hands) else None
+        if side is not None:
+            parts.append(side)
+        return Group(*parts)
+
+    def _hand_block(self, player, i: int, width: int, compact: bool, stacks: bool, is_active: bool):
+        '''One hand: cards, total and result, chips, side bets.'''
+        phase = getattr(self.game, "phase", "")
+        hand = player.hands[i]
+        multi = len(player.hands) > 1
+        hand_active = is_active and (self.active_hand is None or self.active_hand == i)
+        age = self._card_age(hand.cards)
+        parts = [render_cards(hand.cards, width - 2, compact=compact, last_age=age)]
+        status = Text(no_wrap=True, overflow="ellipsis")
+        status.append("▶ " if hand_active and phase == "playing" else "  ", "bold gold1")
+        if multi:
+            status.append(f"H{i + 1} ", "grey62")
+        bet = player.hand_bets[i] if i < len(player.hand_bets) else player.current_bet
+        result = None
+        if age is not None:   # don't give the total away before the card flips
+            status.append(hand_label(SimpleNamespace(cards=hand.cards[:-1])), "bold")
+            status.append(" + ?", "grey62")
+        else:
+            status.append(hand_label(hand), "bold")
+            if getattr(hand, "doubled", False):
+                status.append("  doubled", "gold1")
+            result = player.results[i] if phase == "results" and i < len(player.results) else None
+            natural = hand.is_natural() if hasattr(hand, "is_natural") else hand.is_blackjack() and not multi
+            if result:
+                status.append("  ").append_text(badge(result))
+            elif natural:
+                status.append("  ").append_text(badge("blackjack"))
+            elif hand.is_busted():
+                status.append("  ").append_text(badge("busted"))
+        parts.append(status)
+        parts.append(Padding(self._chips(player, i, bet, result, width - 2, stacks), (0, 0, 0, 2)))
+        side = side_bet_line(hand, revealed=age is None, width=width - 2)
+        if side is not None:
+            parts.append(Padding(side, (0, 0, 0, 2)))
+        return Group(*parts)
+
     def _seat_panel(self, player, inner_w: int, compact: bool, stacks: bool = False):
         game = self.game
         phase = getattr(game, "phase", "")
@@ -1417,39 +1527,12 @@ class RichUI(BaseUI):
             parts.append(Text("sitting out", "grey50 italic"))
         elif not player.hands or not player.hands[0].cards:
             if player.current_bet:
-                parts.append(self._chips(player, 0, player.current_bet, None, inner_w, stacks))
+                parts.append(self._hand_grid(player, inner_w, lambda i, w: self._bet_block(player, i, w, stacks)))
             else:
                 parts.append(Text("placing bet…" if is_active else "", "grey62 italic"))
         else:
-            multi = len(player.hands) > 1
-            for i, hand in enumerate(player.hands):
-                hand_active = is_active and (self.active_hand is None or self.active_hand == i)
-                age = self._card_age(hand.cards)
-                parts.append(render_cards(hand.cards, inner_w - 2, compact=compact, last_age=age))
-                status = Text()
-                status.append("▶ " if hand_active and phase == "playing" else "  ", "bold gold1")
-                if multi:
-                    status.append(f"H{i + 1} ", "grey62")
-                if age is not None:   # don't give the total away before the card flips
-                    status.append(hand_label(SimpleNamespace(cards=hand.cards[:-1])), "bold")
-                    status.append(" + ?", "grey62")
-                    parts.append(status)
-                    bet = player.hand_bets[i] if i < len(player.hand_bets) else player.current_bet
-                    parts.append(Padding(self._chips(player, i, bet, None, inner_w - 2, stacks), (0, 0, 0, 2)))
-                    continue
-                status.append(hand_label(hand), "bold")
-                bet = player.hand_bets[i] if i < len(player.hand_bets) else player.current_bet
-                if bet > player.current_bet:
-                    status.append("  doubled", "gold1")
-                result = player.results[i] if phase == "results" and i < len(player.results) else None
-                if result:
-                    status.append("  ").append_text(badge(result))
-                elif hand.is_blackjack() and len(player.hands) == 1:
-                    status.append("  ").append_text(badge("blackjack"))
-                elif hand.is_busted():
-                    status.append("  ").append_text(badge("busted"))
-                parts.append(status)
-                parts.append(Padding(self._chips(player, i, bet, result, inner_w - 2, stacks), (0, 0, 0, 2)))
+            parts.append(self._hand_grid(player, inner_w,
+                                         lambda i, w: self._hand_block(player, i, w, compact, stacks, is_active)))
 
         border = "bold gold1" if is_active else ("grey35" if sitting_out else ("cyan" if strategy else "green3"))
         return Panel(Group(*parts), title=title, title_align="left", subtitle=subtitle, subtitle_align="right",
@@ -1474,7 +1557,7 @@ def _format_setting(kind: str, value) -> Text:
     return Text(str(value), "bold")
 
 
-def _parse_setting(kind: str, raw: str, minimum):
+def _parse_setting(kind: str, raw: str, minimum, maximum=None):
     '''Turn typed text into a setting value, or raise ValueError with a readable message.'''
     try:
         value = float(raw)
@@ -1488,6 +1571,8 @@ def _parse_setting(kind: str, raw: str, minimum):
         value = int(value)
     if minimum is not None and value < minimum:
         raise ValueError(f"Must be at least {minimum}.")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"Must be at most {maximum}.")
     if kind == "split_limit" and value == 0:
         raise ValueError("Use -1 for unlimited, or 1 or more.")
     return value
@@ -1511,7 +1596,7 @@ def edit_settings(ui, settings: dict, fields: Sequence[dict], strategies: Sequen
     Full-screen editor for game settings. Edits a copy; returns True (and updates `settings`
     in place) only when the user saves.
 
-    fields: [{"key", "label", "kind": int|float|money|seconds|bool|split_limit, "desc", "min"}]
+    fields: [{"key", "label", "kind": int|float|money|seconds|bool|split_limit, "desc", "min", "max"}]
     '''
     import copy
     if not ui.interactive:
@@ -1652,7 +1737,7 @@ def edit_settings(ui, settings: dict, fields: Sequence[dict], strategies: Sequen
                 while True:
                     raw = ui.ask(f"[bold]{item['label']}[/]", default=f"{current:g}" if isinstance(current, (int, float)) else str(current))
                     try:
-                        _set_path(work, key, _parse_setting(item["kind"], raw, item.get("min")))
+                        _set_path(work, key, _parse_setting(item["kind"], raw, item.get("min"), item.get("max")))
                         break
                     except ValueError as e:
                         ui.error(str(e))
