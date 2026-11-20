@@ -318,8 +318,8 @@ def side_bet_line(hand, revealed: bool = True, width: int = 0) -> Optional[Text]
         item = Text(no_wrap=True, overflow="ellipsis")
         if not revealed or key not in hand.side_results:
             item.append(f"{short} ", "gold1").append(money(stake), "bold")
-        elif hand.side_results[key] is None:
-            item.append(f"{short} ", "grey50").append(money(stake), "strike grey50")
+        elif hand.side_results[key] is None:     # lost: marked like the main bet's LOSE badge
+            item.append(f"{short} ", "grey50").append(f" -{money(stake)} ", RESULT_BADGES["lose"][1])
         else:
             name, pays, won = hand.side_results[key]
             # the money first, so a narrow column cuts the outcome's name, not the amount
@@ -636,9 +636,10 @@ class HeadlessUI(BaseUI):
         if self.verbose:
             self.console.print(f"  [red]{message}[/]")
 
-    def pause(self, seconds: float) -> None:
+    def pause(self, seconds: float, skippable: bool = False) -> bool:
         if self.verbose and seconds:
             time.sleep(seconds)
+        return False
 
     def choose(self, prompt: str, options: Sequence[Option], default: Optional[str] = None) -> str:
         hints = "  ".join(f"[{key_label(keys)}] {label}" for keys, _, label in options)
@@ -976,6 +977,47 @@ def side_log_hint(width: int) -> bool:
     return width >= 100   # the side column (and so the scoreboard) only exists on wide screens
 
 
+def header_info(game, room: int) -> Text:
+    '''
+    The right side of the header, fitted to `room` columns. When it doesn't fit, the deck count goes
+    first, then the shoe count, then the player's name (the casino shows it too); after that the
+    table's name is shortened, keeping its limits. Never wider than `room`.
+    '''
+    fields = []   # [priority: lower is dropped first, text, style]
+    table = None
+    if getattr(game, "plugin_mode", False) and game.players:
+        # at the casino the header carries the table and the player's wallet, like the other games
+        if getattr(game, "table_name", None):
+            table = [9, game.table_name, "gold1"]
+            fields.append(table)
+        you = game.players[0]
+        fields.append([2, you.name, "bold"])
+        fields.append([9, money(you.balance), "bold green"])
+    fields.append([9, f"Round {game.game_num}", "bold"])
+    fields.append([1, f"Shoe {len(game.shoe)}/{game.num_decks * 52}", "grey70"])
+    fields.append([0, f"{game.num_decks} deck{'s' if game.num_decks != 1 else ''}", "grey70"])
+    limits = f" · {game.table_limits()}" if table else ""
+
+    def width():
+        return sum(len(t) for _, t, _ in fields) + len(limits) + 3 * (len(fields) - 1)
+
+    while width() > room and min(f[0] for f in fields) < 9:
+        fields.remove(min(fields, key=lambda f: f[0]))
+    if table and width() > room:
+        keep = max(1, len(table[1]) - (width() - room))
+        if keep < len(table[1]):
+            table[1] = table[1][:keep - 1] + "…" if keep > 1 else "…"
+    info = Text(no_wrap=True, overflow="ellipsis")
+    for i, (_, text, style) in enumerate(fields):
+        if i:
+            info.append("   ")
+        info.append(text, style)
+        if table is not None and text is table[1]:
+            info.append(limits, style)
+    info.truncate(max(0, room), overflow="ellipsis")
+    return info
+
+
 class RichUI(BaseUI):
     interactive = True
 
@@ -1076,16 +1118,26 @@ class RichUI(BaseUI):
         if self._live:
             self._dirty.set()
 
-    def pause(self, seconds: float) -> None:
+    def pause(self, seconds: float, skippable: bool = False) -> bool:
+        '''Wait, keeping the screen live. A skippable pause ends at the first keypress (other than Tab),
+        which is swallowed rather than kept for the next prompt; returns True if it was skipped.'''
         end = time.monotonic() + (seconds or 0)
         self._register_new_cards()
         self.refresh()
         end = max(end, self._anim_until)   # always let a hit animation finish
         while (now := time.monotonic()) < end:
+            if skippable and self._live and self._keys.ready():
+                key = self._keys.read()
+                if key == "tab" and self.game is not None:
+                    self._cycle_side()
+                elif key:
+                    self.refresh()
+                    return True
             self._poll_keys()
             time.sleep(min(1 / ANIM_FPS if now < self._anim_until else 0.05, end - now))
             self.refresh()
         self._poll_keys()
+        return False
 
     # hit animation
     def _register_new_cards(self) -> None:
@@ -1266,26 +1318,13 @@ class RichUI(BaseUI):
         return layout
 
     def _header(self):
-        grid = Table.grid(expand=True)
-        grid.add_column(justify="left")
-        grid.add_column(justify="right")
         title = Text.assemble(("♠ ", "bold white"), ("♥ ", "bold red"), ("B L A C K J A C K", "bold gold1"),
                               (" ♦", "bold red"), (" ♣", "bold white"))
-        info = Text(style="grey70")
-        game = self.game
-        if game is not None:
-            total = game.num_decks * 52
-            if getattr(game, "plugin_mode", False) and game.players:
-                # at the casino the header carries the table and the player's wallet, like the other games
-                if getattr(game, "table_name", None):
-                    info.append(f"{game.table_name} · {game.table_limits()}   ", "gold1")
-                you = game.players[0]
-                info.append(f"{you.name}   ", "bold")
-                info.append(f"{money(you.balance)}   ", "bold green")
-            info.append(f"Round {game.game_num}", "bold")
-            info.append(f"   Shoe {len(game.shoe)}/{total}")
-            info.append(f"   {game.num_decks} deck{'s' if game.num_decks != 1 else ''}")
-        grid.add_row(title, info)
+        grid = Table.grid(expand=True, padding=(0, 0, 0, 2))     # at least 2 spaces after the title
+        grid.add_column(justify="left", no_wrap=True)
+        grid.add_column(justify="right", no_wrap=True)
+        room = self.console.size.width - 4 - title.cell_len - 2  # heavy border + padding, then the gap
+        grid.add_row(title, header_info(self.game, room) if self.game is not None else Text(""))
         return Panel(grid, box=box.HEAVY, border_style="gold1")
 
     def _footer(self):
