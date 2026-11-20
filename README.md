@@ -94,7 +94,42 @@ At the casino the game runs in *plugin mode*:
 
   A side bet max set below its min is raised to the min. With the defaults a table plays exactly as before v5.3; a High Roller table might set `max_hands: 3` with both side bets on.
 
-Running `python3 play_blackjack.py` directly is unchanged.
+### Remote players (Terminal Casino 1.2)
+Up to 3 Claude Code sessions can join your table through the casino's MCP server (`PLUGIN_META["multiplayer"] = {"mode": "seats", "max_remote": 3}`; GAME_SPEC §3.6). The casino handles joining, approval and wallets. The game seats them between rounds, after you and before any bots, and they play by the same table rules and limits as you. Each remote player has one hand (no multi-hand), but it can split.
+
+On the felt, a remote player's seat has a magenta border and its label (`Ada (AI)`), balance and bets. While it decides, the seat's border and the footer show `thinking… 12s`. You can still press `Esc` to leave or `?` for the rules: leaving before the deal is free, but mid-round you're asked to confirm, and your bets on the felt are lost. Their chat, joins, leaves and timeouts appear in Table Talk, and everything in Table Talk is sent to them as events.
+
+**Decisions.** Each one is a `remote.ask` with these options. The move in **bold** is the default when the clock runs out.
+
+| `phase` | Options |
+| --- | --- |
+| `bet` | `bet` (`min` = table minimum, `max` = table maximum or their balance, whichever is lower) · **`sit_out`** |
+| `side_bet` (once per side bet the table offers; `view["side_bet"]` says which) | `side_bet` (`min`/`max` per the table, capped at their balance) · **`no_side_bet`** |
+| `insurance` (dealer shows an Ace, table offers insurance) | `insurance` (half their bet) · **`no_insurance`** |
+| `play` (once per decision, per hand) | `hit` · **`stand`** · `double` · `split`. Only the legal ones are offered. |
+
+**The view** holds only what that seat can see. The dealer's hole card shows as `"??"` until the dealer plays, and the shoe's contents never appear:
+
+```json
+{
+  "phase": "play", "round": 12,
+  "table": {"name": "Standard", "min_bet": 5.0, "max_bet": 500.0, "decks": 7,
+            "rules": {"blackjack_pays": "3:2", "dealer": "stands on all 17s, …", "double": "…",
+                      "split_limit": "unlimited", "insurance": true, "hands_per_player": 1,
+                      "side_bets": {"perfect_pairs": {"label": "Perfect Pairs", "min": 5, "max": 100,
+                                                      "pays": {"Perfect pair": "25:1", "…": "…"}}}}},
+  "shoe": {"size": 364, "cards_left": 301},
+  "player": {"name": "Ada (AI)", "balance": 475.0, "bet": 25, "insurance": 0, "hand": 0,
+          "hands": [{"cards": ["9♠", "7♦"], "total": 16, "soft": false, "bet": 25, "doubled": false, "split": false,
+                     "side_bets": {"perfect_pairs": {"bet": 5, "result": null, "won": 0}}}]},
+  "dealer": {"up": "10♣", "cards": ["??", "10♣"]},
+  "seats": [{"name": "Ian", "kind": "human", "bet": 50, "hands": [{"cards": ["10♥", "6♣"], "total": 16, "…": "…"}]}]
+}
+```
+
+`player` is this seat (its own hands; `hand` is the one being played). The casino adds its own `you` entry (name, label, balance) to every view. Once the dealer has played, `dealer` also has every card and the `total`. At the end of each round they had money in, every remote player is settled once with their net for the round (main bet, double, splits, insurance and side bets together), plus a note like `win 19 vs dealer 17; Mixed pair`. A round that never finishes (you leave mid-round, or Ctrl-C) is void for them.
+
+Running `python3 play_blackjack.py` directly is unchanged, and so is any casino table without remote seats.
 
 ## Game Settings
 Settings can be changed in-game: on the player name screen press `Tab` (or type `/settings`) to open the settings editor.

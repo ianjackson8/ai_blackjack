@@ -2,6 +2,15 @@
 
 One entry per release. The newest entry matches `PLUGIN_META["version"]` in `plugin.py` and the release's git tag (`v` + version, e.g. `v5.1.0`).
 
+- v5.4
+  - remote players (Terminal Casino 1.2, GAME_SPEC §3.6): up to 3 Claude Code sessions can sit at your table through the casino's MCP server. `run()` takes `remote`, and `PLUGIN_META["multiplayer"]` declares `seats` with `max_remote` 3
+    - they're seated between rounds and play by the same rules and limits: bet or sit out, Perfect Pairs and 21+3 when the table has them, insurance, then hit/stand/double/split. One hand each
+    - their view holds only what their seat can see: the dealer's hole card stays `??` until the dealer plays, and the shoe's contents never appear. The README documents the format
+    - each player is settled once per round with their net, and a round that never finishes is void
+    - on the felt: magenta seats labelled `Name (AI)`, `thinking… 12s` in the seat border and footer, and your `Esc` (leave) and `?` (rules) keys still work while they think. Chat, joins, leaves and timeouts appear in Table Talk, which they receive as events
+    - on the clock running out: sit out, no side bets, no insurance, stand
+  - seats can be narrower when nobody plays several hands, so four seats fit in one row at 80 columns
+  - with `remote` left out (standalone, or a table with no remote seats) everything plays exactly as in 5.3.1
 - v5.3.1
   - the deal is quicker with several hands out: the whole deal takes at most 1.2 s, plus 0.3 s to show the side bets (3 hands with side bets took 4.3 s), and any key deals the rest at once
   - a lost side bet is marked under its hand (`PP -$5`, styled like the LOSE badge) instead of looking the same as before the deal

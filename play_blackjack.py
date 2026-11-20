@@ -3,7 +3,7 @@
 Play blackjack in terminal
 
 Author: Ian Jackson
-Version v5.3.1
+Version v5.4.0
 '''
 
 import math
@@ -27,8 +27,8 @@ from pathlib import Path
 from bj_sidebets import SIDE_BETS, paytable, side_bet_limits
 from bj_counter import BASE_EDGE, bet_units, load_counter, make_tracker, save_counter, train_counter, evaluate_counter
 from bj_strategy import basic_strategy
-from bj_tui import (HeadlessUI, RichUI, card_markup, edit_settings, esc, hand_label, hand_total, key_value_table, money,
-                 signed_money, stats_table)
+from bj_tui import (HeadlessUI, RichUI, card_markup, card_text, edit_settings, esc, hand_label, hand_total,
+                    key_value_table, money, signed_money, stats_table)
 
 #== Global Variables ==#
 SHOW_OUTPUT = True
@@ -572,12 +572,52 @@ class CounterBot(Bot):
             i += 1
 
 
+class RemoteBot(Player):
+    '''
+    A remote player's seat (Terminal Casino, GAME_SPEC §3.6): a Claude session playing through the
+    casino. Its decisions come from remote.ask; its balance mirrors RemotePlayer.balance at the start
+    of each round, bets come off it on paper, and the round's net goes back through remote.settle.
+    One hand per remote player (no multi-hand), but it can split.
+    '''
+
+    def __init__(self, remote_player):
+        super().__init__(str(remote_player.label), float(remote_player.balance))
+        self.remote_player = remote_player
+        self.remote_id = remote_player.id
+        self.ticket = None          # the open decision, for the "thinking… 12s" countdown
+
+
+class _TableTalk:
+    '''Wraps the UI so every Table Talk line also goes to the remote players (remote.event).'''
+
+    def __init__(self, ui, remote):
+        self._ui, self._remote = ui, remote
+
+    def __getattr__(self, name):
+        return getattr(self._ui, name)
+
+    def log(self, message: str) -> None:
+        self._ui.log(message)
+        try:
+            from rich.text import Text
+            self._remote.event(Text.from_markup(message).plain)
+        except Exception:   # a bad line must never stop the game
+            pass
+
+
 class BlackjackGame:
     def __init__(self, num_decks: int, player_names: List[str], bot_info: List[dict], starting_balance: int, log_file: str,
                  deal_delay: int, allow_double_after_split: bool = True, split_limit: int = 1,
                  allow_insurance: bool = True, save_data: dict = None, ui=None, counter_max_spread: int = 8,
-                 max_hands: int = 1, side_bets: Optional[dict] = None):
+                 max_hands: int = 1, side_bets: Optional[dict] = None, remote=None):
         self.ui = ui or NULL_UI
+        # Terminal Casino remote players (GAME_SPEC §3.6); None = play exactly as before
+        self.remote = remote
+        self.remotes: List[RemoteBot] = []
+        self.raw_ui = self.ui                    # logs that shouldn't be echoed to remote players
+        if remote is not None:
+            self.ui = _TableTalk(self.ui, remote)
+            self.raw_ui.on_idle = self._pump_chat   # show chat while the human is at a prompt
         # humans may play up to max_hands spots at once; bots always play one
         self.max_hands = max(1, min(MAX_HANDS, int(max_hands)))
         # side bets on offer: key (see bj_sidebets.SIDE_BETS) -> (min, max) stake per hand
@@ -662,7 +702,7 @@ class BlackjackGame:
 
     @property
     def seats(self) -> List[Player]:
-        return self.players + self.bots
+        return self.players + self.remotes + self.bots
 
     def setup_round(self) -> None:
         for player in self.seats:
@@ -680,13 +720,13 @@ class BlackjackGame:
         cards = 2 * (sum(len(p.hands) for p in in_play) + 1)
         delay = min(self.deal_delay, 0.25, DEAL_BUDGET_S / cards)
         for player in in_play:
-            if GOD_MODE and not isinstance(player, (Bot, TrainableBot)):
+            if GOD_MODE and type(player) is Player:
                 for hand in player.hands:
                     hand.cards = [Card("Ace", "Hearts"), Card("King", "Hearts")]
         # deal like a real table: one card to each hand, round twice, dealer last
         for _ in range(2):
             for player in in_play:
-                if GOD_MODE and not isinstance(player, (Bot, TrainableBot)):
+                if GOD_MODE and type(player) is Player:
                     continue
                 for hand in player.hands:
                     hand.add_card(self.shoe.draw_card())
@@ -699,13 +739,13 @@ class BlackjackGame:
     def settle_side_bets(self) -> None:
         '''Side bets are decided by the deal alone, so they're paid (or taken) before anyone acts.'''
         up = self.dealer.hands[0].cards[1]
-        for player in self.players:
+        for player in self.players + self.remotes:
             for i, hand in enumerate(player.hands):
                 for key, stake in hand.side_bets.items():
                     info = SIDE_BETS[key]
                     outcome = info["settle"](hand, up)
                     where = f" hand {i + 1}" if len(player.hands) > 1 else ""
-                    who = f"[green3]{esc(player.name)}[/]{where}"
+                    who = f"{self._styled(player)}{where}"
                     player.side_stats["bets"] += 1
                     if outcome:
                         name, pays = outcome
@@ -720,7 +760,7 @@ class BlackjackGame:
                         player.side_stats["net"] -= stake
                         hand.side_results[key] = None
                         self.ui.log(f"{who} {info['label']} loses [red]-{money(stake)}[/]")
-        if any(h.side_bets for p in self.players for h in p.hands):
+        if any(h.side_bets for p in self.players + self.remotes for h in p.hands):
             self.ui.pause(min(self.deal_delay / 2, SIDE_BET_BEAT_S), skippable=True)   # a beat to see the results
 
     def display_table(self) -> None:
@@ -742,8 +782,9 @@ class BlackjackGame:
         return self.split_limit == -1 or player.splits_on(hand.spot) < self.split_limit
 
     def player_turn(self, player: Player) -> None:
+        '''A human's turn, or a remote player's (their choices come from remote.ask).'''
         dealer_visible_card = str(self.dealer.hands[0].cards[1])
-        name = f"[green3]{esc(player.name)}[/]"
+        name = self._styled(player)
 
         hand_index = 0
         while hand_index < len(player.hands):
@@ -766,7 +807,14 @@ class BlackjackGame:
 
                 where = f" · hand {hand_index + 1}/{len(player.hands)}" if len(player.hands) > 1 else ""
                 prompt = f"[bold]{esc(player.name)}[/]{where} — [bold]{hand_label(hand)}[/] vs dealer {card_markup(self.dealer.hands[0].cards[1])}"
-                action = self.ui.choose(prompt, self._action_options(player, hand, hand_index))
+                options = self._action_options(player, hand, hand_index)
+                if isinstance(player, RemoteBot):
+                    action = self._remote_decide(
+                        player, self.remote_view(player, "play", hand_index),
+                        [{"action": value, "label": label} for _, value, label in options],
+                        {"action": "stand"})["action"]
+                else:
+                    action = self.ui.choose(prompt, options)
 
                 if action == "hit":
                     card = self.shoe.draw_card()
@@ -837,6 +885,19 @@ class BlackjackGame:
             self.ui.log(f"Dealer stands on {hand.calculate_value()}")
 
     def offer_insurance(self) -> None:
+        for seat in self.remotes:
+            amount = sum(seat.hand_bets) / 2
+            if not seat.current_bet or amount <= 0 or amount > seat.balance:
+                continue
+            answer = self._remote_decide(
+                seat, self.remote_view(seat, "insurance"),
+                [{"action": "insurance", "label": f"Insurance {money(amount)}", "max_payout": amount * 2},
+                 {"action": "no_insurance", "label": "No insurance"}],
+                {"action": "no_insurance"})
+            if answer["action"] == "insurance":
+                seat.insurance_bet = amount
+                seat.balance -= amount
+                self.ui.log(f"{self._styled(seat)} takes insurance for {money(amount)}")
         for player in self.players:
             if player.current_bet == 0:
                 continue
@@ -917,6 +978,9 @@ class BlackjackGame:
                 player.stats["lose"] += 1
 
     def collect_bet(self, player: Player) -> None:
+        if isinstance(player, RemoteBot):
+            self._remote_bet(player)
+            return
         if isinstance(player, TrainableBot):
             bet = player.choose_bet(self.shoe, DEFAULT_BET)
             if float(bet) > 0:
@@ -1033,6 +1097,226 @@ class BlackjackGame:
                 continue
             return int(amount) if amount.is_integer() else amount
 
+    #== Remote players (Terminal Casino, GAME_SPEC §3.6) ==#
+
+    def _styled(self, player: Player) -> str:
+        '''A seat's name for the log: humans green, remote players magenta, bots cyan.'''
+        colour = "magenta" if isinstance(player, RemoteBot) else "cyan" if isinstance(player, (Bot, TrainableBot)) \
+            else "green3"
+        return f"[{colour}]{esc(player.name)}[/]"
+
+    def remote_round_boundary(self) -> None:
+        '''Seat and unseat remote players (only ever between rounds), and sync their balances.'''
+        if self.remote is None:
+            return
+        leaving = set()
+        for change in self.remote.seat_changes() or []:
+            rp = change["player"]
+            if change["type"] == "leave":
+                leaving.add(rp.id)
+                seat = next((s for s in self.remotes if s.remote_id == rp.id), None)
+                if seat is not None:
+                    self.remotes.remove(seat)
+                    self.raw_ui.log(f"[magenta]{esc(seat.name)}[/] stands up with {money(rp.balance)}")
+            elif change["type"] == "join":
+                self._seat_remote(rp)
+        # anyone the casino lists as seated (e.g. already there when the visit began) gets a seat
+        for rp in list(getattr(self.remote, "players", []) or []):
+            if rp.id not in leaving:
+                self._seat_remote(rp)
+        for seat in self.remotes:
+            seat.balance = float(seat.remote_player.balance)
+        self._pump_chat()
+
+    def _seat_remote(self, rp) -> None:
+        if any(s.remote_id == rp.id for s in self.remotes):
+            return
+        seat = RemoteBot(rp)
+        self.remotes.append(seat)
+        self.balance_history.setdefault(seat.name, [seat.balance])
+        self.raw_ui.log(f"[magenta]{esc(seat.name)}[/] sits down with {money(seat.balance)}")
+
+    def _pump_chat(self) -> None:
+        '''Show remote players' chat in Table Talk (the casino already relays it to them).'''
+        if self.remote is None:
+            return
+        try:
+            messages = self.remote.messages() or []
+        except Exception:
+            return
+        for player_id, text in messages:
+            seat = next((s for s in self.remotes if s.remote_id == player_id), None)
+            who = seat.name if seat is not None else str(player_id)
+            self.raw_ui.log(f"[magenta]{esc(who)}[/]: [italic]{esc(text)}[/]")
+
+    def _remote_decide(self, seat: "RemoteBot", view: dict, options: list, default: dict) -> dict:
+        '''
+        Ask a remote player and wait for the answer, keeping the table alive: the seat shows
+        "thinking… 12s", chat comes in, and the human can still leave (Esc/Q) or read the rules (?).
+        On a timeout, a disconnect or an answer that isn't legal, the default move is made.
+        '''
+        try:
+            ticket = self.remote.ask(seat.remote_id, view, options, default)
+        except Exception as e:
+            self.raw_ui.log(f"[magenta]{esc(seat.name)}[/] [grey62]can't be asked ({esc(e)}) — {self._label(options, default)}[/]")
+            return default
+        seat.ticket = ticket
+        self.ui.set_active(seat)
+        try:
+            while not ticket.done():
+                key = self.raw_ui.poll_key(0.1)
+                if key in ("esc", "q", "Q", "l", "L"):
+                    self._human_leaves()
+                elif key == "?":
+                    self.parse_command("help")
+                self._pump_chat()
+        finally:
+            seat.ticket = None
+            self.raw_ui.refresh()
+        answer = ticket.answer if isinstance(getattr(ticket, "answer", None), dict) else default
+        if getattr(ticket, "timed_out", False):
+            self.ui.log(f"{self._styled(seat)} ran out of time — {self._label(options, default)}")
+        return answer if self._legal(answer, options) else default
+
+    @staticmethod
+    def _label(options: list, move: dict) -> str:
+        opt = next((o for o in options if o["action"] == move.get("action")), None) or {}
+        return str(opt.get("label") or move.get("action", "")).lower()
+
+    @staticmethod
+    def _legal(answer: dict, options: list) -> bool:
+        opt = next((o for o in options if o["action"] == answer.get("action")), None)
+        if opt is None:
+            return False
+        if "min" in opt or "max" in opt:
+            try:
+                amount = float(answer.get("amount"))
+            except (TypeError, ValueError):
+                return False
+            return math.isfinite(amount) and opt.get("min", 0) <= amount <= opt.get("max", amount)
+        return True
+
+    def _human_leaves(self) -> None:
+        '''Esc/Q while a remote player is deciding. Before the deal it's free; mid-round, the bets on
+        the felt are lost (and the remote players' round is void, since it's never settled).'''
+        if self.phase == "betting":
+            self.refund_unplayed_bets()
+            raise LeaveTable()
+        choice = self.raw_ui.choose("Leave the table mid-round? Your bets on the felt are lost.",
+                                    [("y", "y", "Leave"), ("n", "n", "Stay")], default="n")
+        if choice == "y":
+            raise LeaveTable()
+
+    def _remote_bet(self, seat: "RemoteBot") -> None:
+        lo = self.min_bet if self.min_bet is not None else 1.0
+        hi = min(self.max_bet if self.max_bet is not None else seat.balance, seat.balance)
+        if seat.balance < lo or hi <= 0:
+            self.ui.log(f"{self._styled(seat)} [grey62]can't cover the {money(lo)} minimum — sits out[/]")
+            return
+        answer = self._remote_decide(seat, self.remote_view(seat, "bet"),
+                                     [{"action": "bet", "label": "Bet", "min": lo, "max": hi},
+                                      {"action": "sit_out", "label": "Sit out"}],
+                                     {"action": "sit_out"})
+        if answer["action"] != "bet":
+            self.ui.log(f"{self._styled(seat)} [grey62]sits out this round[/]")
+            return
+        bet = float(answer["amount"])
+        bet = int(bet) if bet.is_integer() else round(bet, 2)
+        seat.place_bets([bet])
+        self.ui.log(f"{self._styled(seat)} bets {money(bet)}")
+        for key, (s_lo, s_hi) in self.side_bets.items():
+            s_hi = min(s_hi, seat.balance)
+            if s_hi < s_lo:
+                continue
+            info = SIDE_BETS[key]
+            answer = self._remote_decide(
+                seat, {**self.remote_view(seat, "side_bet"), "side_bet": key},
+                [{"action": "side_bet", "label": f"{info['label']} bet", "min": s_lo, "max": s_hi},
+                 {"action": "no_side_bet", "label": f"No {info['label']}"}],
+                {"action": "no_side_bet"})
+            if answer["action"] == "side_bet":
+                amount = float(answer["amount"])
+                amount = int(amount) if amount.is_integer() else round(amount, 2)
+                seat.hands[0].side_bets[key] = amount
+                seat.balance -= amount
+                self.ui.log(f"{self._styled(seat)} bets {money(amount)} on {info['label']}")
+
+    def settle_remotes(self) -> None:
+        '''Once per round, each remote player who had money in gets their net through remote.settle.'''
+        for seat in self.remotes:
+            if not seat.current_bet:
+                continue
+            net = round(seat.balance - seat.round_start_balance, 2)
+            parts = []
+            for hand, result in zip(seat.hands, seat.results):
+                parts.append(f"{result} {hand.calculate_value()}")
+            dealer = self.dealer.hands[0]
+            note = f"{', '.join(parts)} vs dealer {'bust' if dealer.is_busted() else dealer.calculate_value()}"
+            sides = [r[0] for h in seat.hands for r in h.side_results.values() if r]
+            if sides:
+                note += f"; {', '.join(sides)}"
+            self.remote.settle(seat.remote_id, net, note)
+
+    def remote_view(self, seat: Player, phase: str, hand_index: Optional[int] = None) -> dict:
+        '''
+        What one seat can see right now (GAME_SPEC §3.6 fair play): its own hands, the dealer's up card
+        (the hole card only once revealed), every seat's face-up cards and bets, the rules and limits,
+        its balance, and the shoe's size and cards left. Never the shoe's contents or the hole card.
+        '''
+        def hand_info(player, i, hand):
+            total, soft = hand_total(hand)
+            info = {"cards": [card_text(c) for c in hand.cards], "total": total, "soft": soft,
+                    "bet": player.hand_stake(i), "doubled": hand.doubled, "split": hand.split}
+            if hand.side_bets:
+                info["side_bets"] = {k: {"bet": amt, "result": (hand.side_results[k] or (None,))[0],
+                                         "won": (hand.side_results[k] or (0, 0, 0))[2]}
+                                     if k in hand.side_results else {"bet": amt}
+                                     for k, amt in hand.side_bets.items()}
+            return info
+
+        def hands_of(player):
+            return [hand_info(player, i, h) for i, h in enumerate(player.hands) if h.cards or player.hand_bets]
+
+        dealer_cards = self.dealer.hands[0].cards
+        revealed = self.phase in ("dealer", "results", "over")
+        dealer = {"up": card_text(dealer_cards[1]) if len(dealer_cards) >= 2 else None}
+        if revealed and dealer_cards:
+            dealer["cards"] = [card_text(c) for c in dealer_cards]
+            dealer["total"] = self.dealer.hands[0].calculate_value()
+        elif len(dealer_cards) >= 2:
+            dealer["cards"] = ["??", card_text(dealer_cards[1])]
+
+        others = []
+        for p in self.seats:
+            if p is seat:
+                continue
+            kind = "ai" if isinstance(p, RemoteBot) else "bot" if isinstance(p, (Bot, TrainableBot)) else "human"
+            others.append({"name": p.name, "kind": kind, "bet": sum(p.hand_bets), "hands": hands_of(p)})
+
+        rules = {
+            "blackjack_pays": "3:2", "dealer": "stands on all 17s, peeks for blackjack with an Ace or ten up",
+            "double": "any first two cards" + (", also after splitting" if self.allow_double_after_split else ""),
+            "split_limit": "unlimited" if self.split_limit == -1 else self.split_limit,
+            "insurance": self.allow_insurance, "hands_per_player": 1,
+            "side_bets": {k: {"label": SIDE_BETS[k]["label"], "min": lo, "max": hi,
+                              "pays": {name: f"{n}:1" for name, n in SIDE_BETS[k]["pays"]}}
+                          for k, (lo, hi) in self.side_bets.items()},
+        }
+        view = {
+            "phase": phase,
+            "round": self.game_num,
+            "table": {"name": self.table_name, "min_bet": self.min_bet, "max_bet": self.max_bet,
+                      "decks": self.num_decks, "rules": rules},
+            "shoe": {"size": self.num_decks * 52, "cards_left": len(self.shoe)},
+            "player": {"name": seat.name, "balance": round(float(seat.balance), 2), "bet": sum(seat.hand_bets),
+                    "insurance": seat.insurance_bet, "hands": hands_of(seat)},
+            "dealer": dealer,
+            "seats": others,
+        }
+        if hand_index is not None:
+            view["player"]["hand"] = hand_index
+        return view
+
     def _within_limits(self, amount, balance):
         '''Clamp a suggested bet to the table limits (plugin mode) and the balance.'''
         if self.min_bet is not None:
@@ -1047,6 +1331,7 @@ class BlackjackGame:
         return f"{low}–{money(self.max_bet)}" if self.max_bet is not None else f"{low}+"
 
     def play_round(self) -> None:
+        self.remote_round_boundary()
         self.check_shoe()
         self.setup_round()
         self.ui.log(f"[bold gold1]── Round {self.game_num} ──[/]")
@@ -1071,7 +1356,7 @@ class BlackjackGame:
 
         for player in self.seats:
             if player.current_bet > 0 and not dealer_peeked_blackjack:
-                if isinstance(player, (Bot, TrainableBot)):
+                if isinstance(player, (Bot, TrainableBot)) and not isinstance(player, RemoteBot):
                     player.play_turn(self.shoe, str(self.dealer.hands[0].cards[1]), self.deal_delay, ui=self.ui)
                 else:
                     self.player_turn(player)
@@ -1086,6 +1371,7 @@ class BlackjackGame:
                                             player.balance - player.round_start_balance, DEFAULT_BET)
         self.phase = "results"
         self.ui.set_active(None)
+        self.settle_remotes()
 
         # counters see every card that was shown this round
         shown = [c.rank for c in self.dealer.hands[0].cards]
@@ -1201,7 +1487,7 @@ class BlackjackGame:
             json.dump(self.log_entries, file, indent=4)
 
     def check_shoe(self, force: bool = False):
-        hands = len(self.players) * self.max_hands + len(self.bots) + 1
+        hands = len(self.players) * self.max_hands + len(self.remotes) + len(self.bots) + 1
         if len(self.shoe) < hands * 3 or force:
             self.ui.log("[magenta]Shuffling a fresh shoe…[/]")
             self.shoe = Shoe(self.num_decks)
@@ -1867,10 +2153,11 @@ def table_options(settings: dict) -> dict:
     }
 
 
-def play_as_plugin(player_name: str, balance: float, table: Optional[dict] = None) -> float:
+def play_as_plugin(player_name: str, balance: float, table: Optional[dict] = None, remote=None) -> float:
     '''
     Run one visit to the table for Terminal Casino and return the player's balance when they leave.
-    Single seat, no bots. Rules come from this folder's game_settings.json, overridden for this visit
+    One human seat plus any remote players the casino seats (`remote`, GAME_SPEC §3.6), no bots.
+    Remote players settle through remote.settle at the end of each round. Rules come from this folder's game_settings.json, overridden for this visit
     by the casino table's rules; the table's min/max bet are enforced. Never exits the process, and
     always gives the terminal back.
     '''
@@ -1897,6 +2184,7 @@ def play_as_plugin(player_name: str, balance: float, table: Optional[dict] = Non
             split_limit=settings.get('split_limit', 1),
             allow_insurance=settings.get('allow_insurance', True),
             ui=ui,
+            remote=remote,
             **table_options(settings),
         )
         if table is not None:

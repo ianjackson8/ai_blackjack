@@ -13,8 +13,10 @@ PLUGIN_META = {
     "name": "Blackjack",
     "description": "Beat the dealer to 21. Blackjack pays 3:2.",
     "min_bet": 1.0,
-    "version": "5.3.1",
+    "version": "5.4.0",
     "author": "Ian Jackson",
+    # Remote players (GAME_SPEC §3.6): Claude Code sessions take seats through the casino's MCP server
+    "multiplayer": {"mode": "seats", "max_remote": 3},
     # Table rules the casino can set per table (GAME_SPEC §3.5). Defaults match game_settings.json.
     "rules": {
         "num_decks": {"type": "int", "label": "Decks", "default": 7, "min": 1, "max": 8,
@@ -43,11 +45,12 @@ PLUGIN_META = {
 }
 
 
-def run(player_name: str, balance: float, table: dict = None) -> float:
+def run(player_name: str, balance: float, table: dict = None, remote=None) -> float:
     '''Play until the player leaves the table; return their balance. `table` is the casino table
-    (name, min_bet, max_bet, rules); without it the game's own settings are used.'''
+    (name, min_bet, max_bet, rules); without it the game's own settings are used. `remote` seats
+    remote players (GAME_SPEC §3.6); None plays exactly as a single-seat table.'''
     if str(HERE) not in sys.path:
         sys.path.insert(0, str(HERE))
     from play_blackjack import play_as_plugin   # lazy: pulls in torch/numpy only when playing
 
-    return play_as_plugin(player_name, balance, table)
+    return play_as_plugin(player_name, balance, table, remote)
